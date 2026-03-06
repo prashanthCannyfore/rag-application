@@ -22,6 +22,7 @@ from app.services.cache_service import summary_cache_service, cache_service
 from app.services.versioning_service import versioning_service
 from app.services.background_service import background_job_service, JobType
 from app.services.team_service import team_service
+from app.services.pdf_service import pdf_service
 from app.middleware.logging_config import logger
 
 # Load environment
@@ -88,13 +89,29 @@ async def upload_document(
 ):
     """
     Upload and process a document for RAG
+    Supports: PDF, TXT, MD, DOC, DOCX, CSV, and other text-based formats
     """
     try:
         document_id = str(uuid.uuid4())
         
         # Read file content
         content = await file.read()
-        text = content.decode('utf-8', errors='ignore')
+        
+        # Extract text based on file type
+        file_type = metadata_service._get_file_type(file.filename)
+        text = ""
+        
+        if file_type == "application/pdf":
+            # Process PDF files
+            text = pdf_service.extract_text_from_pdf(content, file.filename)
+            pdf_metadata = pdf_service.extract_metadata_from_pdf(content)
+            print(f"Extracted {len(text)} chars from PDF, {pdf_metadata.get('pages', 'N/A')} pages")
+        else:
+            # Process text-based files
+            text = content.decode('utf-8', errors='ignore')
+        
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Could not extract text from file")
         
         # Extract metadata
         metadata = metadata_service.extract_metadata(file, document_name)
@@ -141,7 +158,8 @@ async def upload_document(
                 "document_id": document_id,
                 "chunks_created": len(chunks),
                 "document_name": document_name,
-                "team_id": team_id
+                "team_id": team_id,
+                "file_type": file_type
             }
         )
         
@@ -154,6 +172,8 @@ async def upload_document(
             "metadata": metadata
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Upload error: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
@@ -476,7 +496,8 @@ async def rag_health():
             "versioning": "enabled",
             "team_isolation": "enabled",
             "caching": "enabled",
-            "batch_processing": "enabled"
+            "batch_processing": "enabled",
+            "pdf_support": "enabled"
         },
         "cache": cache_stats
     }

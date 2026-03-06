@@ -42,7 +42,9 @@ class EmbeddingsService:
     def get_embedding_dimension(self) -> int:
         """Return embedding vector dimension"""
         # models/gemini-embedding-001 produces 3072-dimensional vectors
-        return 3072
+        # Truncate to 2000 for pgvector compatibility
+        return 2000
+
     
     def cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         """Calculate cosine similarity between two vectors"""

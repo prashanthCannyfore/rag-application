@@ -1,67 +1,72 @@
 """
-Vector database service using Supabase pgvector
+Vector database service using PostgreSQL with JSONB embeddings
 """
 import os
+import json
 from typing import List, Dict, Optional
 from datetime import datetime
 from dotenv import load_dotenv
-from supabase import create_client, Client
-from app.services.embeddings_service import embeddings_service
+import psycopg2
 
 # Load environment
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.env')
 load_dotenv(dotenv_path=env_path)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
 VECTOR_TABLE = os.getenv("VECTOR_TABLE_NAME", "document_embeddings")
 
 class VectorDBService:
-    """Service for managing vector embeddings in Supabase"""
+    """Service for managing vector embeddings in PostgreSQL"""
     
     def __init__(self):
-        if SUPABASE_URL and SUPABASE_KEY:
-            self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        else:
-            self.supabase = None
+        self.conn = None
+        if DATABASE_URL:
+            try:
+                self.conn = psycopg2.connect(DATABASE_URL)
+                self._create_table()
+            except Exception as e:
+                print(f"PostgreSQL connection error: {e}")
+                self.conn = None
     
-    def create_tables(self):
-        """Create vector database tables"""
-        if not self.supabase:
-            print("Supabase not configured, skipping table creation")
+    def _create_table(self):
+        """Create vector database table"""
+        if not self.conn:
+            print("PostgreSQL not configured, skipping table creation")
             return
         
-        sql = f"""
-        -- Enable pgvector extension
-        CREATE EXTENSION IF NOT EXISTS vector;
-        
-        -- Create document embeddings table
-        CREATE TABLE IF NOT EXISTS {VECTOR_TABLE} (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            content TEXT NOT NULL,
-            metadata JSONB DEFAULT '{{}}',
-            embedding VECTOR(768),
-            document_id VARCHAR(255),
-            chunk_index INTEGER DEFAULT 0,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        );
-        
-        -- Create index for vector similarity search
-        CREATE INDEX IF NOT EXISTS idx_{VECTOR_TABLE}_embedding 
-        ON {VECTOR_TABLE} USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 100);
-        
-        -- Create index for document lookup
-        CREATE INDEX IF NOT EXISTS idx_{VECTOR_TABLE}_document_id 
-        ON {VECTOR_TABLE}(document_id);
-        """
-        
         try:
-            self.supabase.rpc("run_sql_query", {"sql_text": sql}).execute()
-            print(f"✓ Table {VECTOR_TABLE} created successfully")
+            with self.conn.cursor() as cur:
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {VECTOR_TABLE} (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        content TEXT NOT NULL,
+                        metadata JSONB DEFAULT '{{}}'::jsonb,
+                        embedding JSONB,
+                        document_id VARCHAR(255),
+                        chunk_index INTEGER DEFAULT 0,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    );
+                    
+                    CREATE INDEX IF NOT EXISTS idx_{VECTOR_TABLE}_document_id 
+                    ON {VECTOR_TABLE}(document_id);
+                """)
+            self.conn.commit()
+            print(f"✓ Table {VECTOR_TABLE} created/verified successfully")
         except Exception as e:
-            print(f"Note: {e}")
-            print("Run SQL manually in Supabase SQL Editor if needed")
+            print(f"Table creation error: {e}")
+    
+    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        """Calculate cosine similarity"""
+        import numpy as np
+        v1 = np.array(vec1)
+        v2 = np.array(vec2)
+        dot_product = np.dot(v1, v2)
+        norm1 = np.linalg.norm(v1)
+        norm2 = np.linalg.norm(v2)
+        
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        return dot_product / (norm1 * norm2)
     
     async def add_document(
         self,
@@ -71,8 +76,7 @@ class VectorDBService:
         chunk_index: int = 0
     ) -> Dict:
         """Add a document chunk with embedding"""
-        if not self.supabase:
-            # Demo mode - return mock data
+        if not self.conn:
             return {
                 "id": "demo-id",
                 "content": content[:100],
@@ -80,21 +84,38 @@ class VectorDBService:
                 "chunk_index": chunk_index
             }
         
-        # Generate embedding
-        embedding = embeddings_service.embed_text(content)
-        
-        # Store in database
-        data = {
-            "content": content,
-            "metadata": metadata or {},
-            "embedding": embedding,
-            "document_id": document_id,
-            "chunk_index": chunk_index,
-            "created_at": datetime.now().isoformat()
-        }
-        
-        result = self.supabase.table(VECTOR_TABLE).insert(data).execute()
-        return result.data[0]
+        try:
+            from app.services.embeddings_service import embeddings_service
+            embedding = embeddings_service.embed_text(content)
+            metadata_json = json.dumps(metadata or {})
+            embedding_json = json.dumps(embedding)
+            
+            with self.conn.cursor() as cur:
+                cur.execute(f"""
+                    INSERT INTO {VECTOR_TABLE} (content, metadata, embedding, document_id, chunk_index, created_at)
+                    VALUES (%s, %s::jsonb, %s::jsonb, %s, %s, %s)
+                    RETURNING id, content, metadata, document_id, chunk_index
+                """, (
+                    content,
+                    metadata_json,
+                    embedding_json,
+                    document_id,
+                    chunk_index,
+                    datetime.now().isoformat()
+                ))
+                result = cur.fetchone()
+                self.conn.commit()
+                
+                return {
+                    "id": str(result[0]),
+                    "content": result[1],
+                    "metadata": result[2],
+                    "document_id": result[3],
+                    "chunk_index": result[4]
+                }
+        except Exception as e:
+            print(f"Add document error: {e}")
+            return {}
     
     async def add_documents(
         self,
@@ -123,46 +144,46 @@ class VectorDBService:
         document_id: Optional[str] = None
     ) -> List[Dict]:
         """Search for similar documents using vector similarity"""
-        if not self.supabase:
-            # Demo mode - return mock results
-            return [
-                {
-                    "content": f"Demo result for: {query}",
-                    "similarity": 0.95,
-                    "document_id": "demo-doc",
-                    "metadata": {}
-                }
-            ]
-        
-        # Generate query embedding
-        query_embedding = embeddings_service.embed_query(query)
-        
-        # Build search query
-        if document_id:
-            # Search within specific document
-            sql = f"""
-            SELECT id, content, metadata, document_id, chunk_index,
-                   1 - (embedding <=> '{query_embedding}') as similarity
-            FROM {VECTOR_TABLE}
-            WHERE document_id = '{document_id}'
-            ORDER BY embedding <=> '{query_embedding}'
-            LIMIT {limit}
-            """
-        else:
-            # Search all documents
-            sql = f"""
-            SELECT id, content, metadata, document_id, chunk_index,
-                   1 - (embedding <=> '{query_embedding}') as similarity
-            FROM {VECTOR_TABLE}
-            ORDER BY embedding <=> '{query_embedding}'
-            LIMIT {limit}
-            """
+        if not self.conn:
+            return []
         
         try:
-            result = self.supabase.rpc("run_sql_query", {"sql_text": sql}).execute()
-            return result.data
+            from app.services.embeddings_service import embeddings_service
+            query_embedding = embeddings_service.embed_query(query)
+            
+            with self.conn.cursor() as cur:
+                if document_id:
+                    cur.execute(f"""
+                        SELECT id, content, metadata, document_id, chunk_index, embedding
+                        FROM {VECTOR_TABLE}
+                        WHERE document_id = %s
+                    """, (document_id,))
+                else:
+                    cur.execute(f"""
+                        SELECT id, content, metadata, document_id, chunk_index, embedding
+                        FROM {VECTOR_TABLE}
+                    """)
+                
+                results = cur.fetchall()
+                
+                scored = []
+                for row in results:
+                    embedding_json = row[5]
+                    if embedding_json:
+                        row_embedding = json.loads(embedding_json)
+                        similarity = self._cosine_similarity(query_embedding, row_embedding)
+                        scored.append({
+                            "id": str(row[0]),
+                            "content": row[1],
+                            "metadata": row[2],
+                            "document_id": row[3],
+                            "chunk_index": row[4],
+                            "similarity": similarity
+                        })
+                
+                scored.sort(key=lambda x: x["similarity"], reverse=True)
+                return scored[:limit]
         except Exception as e:
-            # Fallback to simple search
             print(f"Vector search error: {e}")
             return []
     
@@ -173,13 +194,9 @@ class VectorDBService:
         document_id: Optional[str] = None
     ) -> List[Dict]:
         """Hybrid search: vector similarity + keyword matching"""
-        # Get vector search results
         vector_results = await self.search(query, limit=limit * 2, document_id=document_id)
-        
-        # Get keyword search results
         keyword_results = await self.keyword_search(query, limit=limit, document_id=document_id)
         
-        # Merge and re-rank results
         combined = {}
         
         for result in vector_results:
@@ -207,7 +224,6 @@ class VectorDBService:
                     "final_score": result.get("score", 0) * 0.3
                 }
         
-        # Sort by final score and return top results
         sorted_results = sorted(combined.values(), key=lambda x: x["final_score"], reverse=True)
         return sorted_results[:limit]
     
@@ -218,48 +234,55 @@ class VectorDBService:
         document_id: Optional[str] = None
     ) -> List[Dict]:
         """Simple keyword-based search"""
-        if not self.supabase:
+        if not self.conn:
             return []
         
         try:
-            query_builder = self.supabase.table(VECTOR_TABLE).select(
-                "id, content, metadata, document_id, chunk_index"
-            )
-            
-            if document_id:
-                query_builder = query_builder.eq("document_id", document_id)
-            
-            # Simple text search (PostgreSQL full-text search would be better)
-            results = query_builder.limit(limit * 2).execute()
-            
-            # Score by keyword matches
-            scored = []
-            query_words = query.lower().split()
-            
-            for item in results.data:
-                content_lower = item.get("content", "").lower()
-                score = sum(1 for word in query_words if word in content_lower) / len(query_words)
+            with self.conn.cursor() as cur:
+                if document_id:
+                    cur.execute(f"""
+                        SELECT id, content, metadata, document_id, chunk_index
+                        FROM {VECTOR_TABLE}
+                        WHERE document_id = %s
+                    """, (document_id,))
+                else:
+                    cur.execute(f"""
+                        SELECT id, content, metadata, document_id, chunk_index
+                        FROM {VECTOR_TABLE}
+                    """)
                 
-                scored.append({
-                    **item,
-                    "score": score
-                })
-            
-            # Sort by score
-            scored.sort(key=lambda x: x["score"], reverse=True)
-            return scored[:limit]
-            
+                results = cur.fetchall()
+                
+                query_words = query.lower().split()
+                scored = []
+                
+                for row in results:
+                    content_lower = row[1].lower()
+                    score = sum(1 for word in query_words if word in content_lower) / max(len(query_words), 1)
+                    scored.append({
+                        "id": str(row[0]),
+                        "content": row[1],
+                        "metadata": row[2],
+                        "document_id": row[3],
+                        "chunk_index": row[4],
+                        "score": score
+                    })
+                
+                scored.sort(key=lambda x: x["score"], reverse=True)
+                return scored[:limit]
         except Exception as e:
             print(f"Keyword search error: {e}")
             return []
     
     async def delete_document(self, document_id: str) -> bool:
         """Delete all chunks for a document"""
-        if not self.supabase:
+        if not self.conn:
             return True
         
         try:
-            self.supabase.table(VECTOR_TABLE).delete().eq("document_id", document_id).execute()
+            with self.conn.cursor() as cur:
+                cur.execute(f"DELETE FROM {VECTOR_TABLE} WHERE document_id = %s", (document_id,))
+            self.conn.commit()
             return True
         except Exception as e:
             print(f"Delete error: {e}")
@@ -267,14 +290,22 @@ class VectorDBService:
     
     async def get_document_count(self) -> int:
         """Get total number of documents"""
-        if not self.supabase:
+        if not self.conn:
             return 0
         
         try:
-            result = self.supabase.table(VECTOR_TABLE).select("id", count="exact").execute()
-            return result.count or 0
+            with self.conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(DISTINCT document_id) FROM {VECTOR_TABLE}")
+                result = cur.fetchone()
+                return result[0] if result else 0
         except Exception:
             return 0
+    
+    def close(self):
+        """Close database connection"""
+        if self.conn:
+            self.conn.close()
+
 
 # Singleton instance
 vector_db_service = VectorDBService()
