@@ -21,9 +21,10 @@ class DocumentVersion:
     document_id: str
     version: int
     content: str
-    metadata: Dict[str, Any]
-    created_at: datetime
-    created_by: Optional[str]
+    content_bytes: Optional[bytes] = None
+    metadata: Dict[str, Any] = None
+    created_at: datetime = None
+    created_by: Optional[str] = None
 
 class VersioningService:
     """Service for managing document versions"""
@@ -45,7 +46,8 @@ class VersioningService:
         document_id: str,
         content: str,
         metadata: Dict[str, Any],
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
+        content_bytes: Optional[bytes] = None
     ) -> DocumentVersion:
         """Create a new version of a document"""
         version_id = str(uuid.uuid4())
@@ -60,7 +62,8 @@ class VersioningService:
             document_id=document_id,
             version=current_version,
             content=content,
-            metadata=metadata,
+            content_bytes=content_bytes,
+            metadata=metadata or {},
             created_at=datetime.now(),
             created_by=user_id
         )

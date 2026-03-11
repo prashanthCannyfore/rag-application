@@ -1,5 +1,5 @@
 """
-Vector database service using PostgreSQL with JSONB embeddings
+Vector database service using PostgreSQL with pgvector
 """
 import os
 import json
@@ -7,6 +7,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 from dotenv import load_dotenv
 import psycopg2
+from pgvector.psycopg2 import register_vector
 
 # Load environment
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.env')
@@ -23,10 +24,32 @@ class VectorDBService:
         if DATABASE_URL:
             try:
                 self.conn = psycopg2.connect(DATABASE_URL)
+                register_vector(self.conn)
+                self._ensure_extension()
                 self._create_table()
             except Exception as e:
                 print(f"PostgreSQL connection error: {e}")
                 self.conn = None
+    
+    def _ensure_extension(self):
+        """Ensure pgvector extension is enabled"""
+        if not self.conn:
+            return
+        
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'vector';")
+                if not cur.fetchone():
+                    try:
+                        cur.execute("CREATE EXTENSION vector;")
+                        self.conn.commit()
+                        print("✓ pgvector extension created")
+                    except Exception as e:
+                        print(f"Extension creation error: {e}")
+                        print("Please install pgvector manually")
+                        self.conn = None
+        except Exception as e:
+            print(f"Extension check error: {e}")
     
     def _create_table(self):
         """Create vector database table"""
@@ -41,11 +64,15 @@ class VectorDBService:
                         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         content TEXT NOT NULL,
                         metadata JSONB DEFAULT '{{}}'::jsonb,
-                        embedding JSONB,
+                        embedding VECTOR(2000),
                         document_id VARCHAR(255),
                         chunk_index INTEGER DEFAULT 0,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                     );
+                    
+                    CREATE INDEX IF NOT EXISTS idx_{VECTOR_TABLE}_embedding 
+                    ON {VECTOR_TABLE} USING ivfflat (embedding vector_cosine_ops)
+                    WITH (lists = 100);
                     
                     CREATE INDEX IF NOT EXISTS idx_{VECTOR_TABLE}_document_id 
                     ON {VECTOR_TABLE}(document_id);
@@ -54,19 +81,6 @@ class VectorDBService:
             print(f"✓ Table {VECTOR_TABLE} created/verified successfully")
         except Exception as e:
             print(f"Table creation error: {e}")
-    
-    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """Calculate cosine similarity"""
-        import numpy as np
-        v1 = np.array(vec1)
-        v2 = np.array(vec2)
-        dot_product = np.dot(v1, v2)
-        norm1 = np.linalg.norm(v1)
-        norm2 = np.linalg.norm(v2)
-        
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-        return dot_product / (norm1 * norm2)
     
     async def add_document(
         self,
@@ -88,17 +102,16 @@ class VectorDBService:
             from app.services.embeddings_service import embeddings_service
             embedding = embeddings_service.embed_text(content)
             metadata_json = json.dumps(metadata or {})
-            embedding_json = json.dumps(embedding)
             
             with self.conn.cursor() as cur:
                 cur.execute(f"""
                     INSERT INTO {VECTOR_TABLE} (content, metadata, embedding, document_id, chunk_index, created_at)
-                    VALUES (%s, %s::jsonb, %s::jsonb, %s, %s, %s)
+                    VALUES (%s, %s::jsonb, %s::vector, %s, %s, %s)
                     RETURNING id, content, metadata, document_id, chunk_index
                 """, (
                     content,
                     metadata_json,
-                    embedding_json,
+                    embedding,
                     document_id,
                     chunk_index,
                     datetime.now().isoformat()
@@ -154,35 +167,34 @@ class VectorDBService:
             with self.conn.cursor() as cur:
                 if document_id:
                     cur.execute(f"""
-                        SELECT id, content, metadata, document_id, chunk_index, embedding
+                        SELECT id, content, metadata, document_id, chunk_index,
+                               1 - (embedding <=> %s::vector) as similarity
                         FROM {VECTOR_TABLE}
                         WHERE document_id = %s
-                    """, (document_id,))
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                    """, (query_embedding, document_id, query_embedding, limit))
                 else:
                     cur.execute(f"""
-                        SELECT id, content, metadata, document_id, chunk_index, embedding
+                        SELECT id, content, metadata, document_id, chunk_index,
+                               1 - (embedding <=> %s::vector) as similarity
                         FROM {VECTOR_TABLE}
-                    """)
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                    """, (query_embedding, query_embedding, limit))
                 
                 results = cur.fetchall()
-                
-                scored = []
-                for row in results:
-                    embedding_json = row[5]
-                    if embedding_json:
-                        row_embedding = json.loads(embedding_json)
-                        similarity = self._cosine_similarity(query_embedding, row_embedding)
-                        scored.append({
-                            "id": str(row[0]),
-                            "content": row[1],
-                            "metadata": row[2],
-                            "document_id": row[3],
-                            "chunk_index": row[4],
-                            "similarity": similarity
-                        })
-                
-                scored.sort(key=lambda x: x["similarity"], reverse=True)
-                return scored[:limit]
+                return [
+                    {
+                        "id": str(row[0]),
+                        "content": row[1],
+                        "metadata": row[2],
+                        "document_id": row[3],
+                        "chunk_index": row[4],
+                        "similarity": row[5]
+                    }
+                    for row in results
+                ]
         except Exception as e:
             print(f"Vector search error: {e}")
             return []
@@ -196,7 +208,7 @@ class VectorDBService:
         """Hybrid search: vector similarity + keyword matching"""
         vector_results = await self.search(query, limit=limit * 2, document_id=document_id)
         keyword_results = await self.keyword_search(query, limit=limit, document_id=document_id)
-        
+        print("hit")
         combined = {}
         
         for result in vector_results:
@@ -259,6 +271,7 @@ class VectorDBService:
                 for row in results:
                     content_lower = row[1].lower()
                     score = sum(1 for word in query_words if word in content_lower) / max(len(query_words), 1)
+                    print(score)
                     scored.append({
                         "id": str(row[0]),
                         "content": row[1],

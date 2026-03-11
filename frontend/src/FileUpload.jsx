@@ -10,6 +10,7 @@ function FileUpload({ onUploadSuccess }) {
 
     setUploading(true)
     
+    // Upload files one by one
     for (const file of files) {
       try {
         const formData = new FormData()

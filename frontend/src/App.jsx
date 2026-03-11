@@ -7,6 +7,7 @@ function App() {
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(false)
   const [uploadedFiles, setUploadedFiles] = useState([])
+  const [lastSearch, setLastSearch] = useState(null)
 
   const handleUploadSuccess = (result) => {
     setUploadedFiles(prev => [...prev, result])
@@ -14,6 +15,39 @@ function App() {
       type: 'system',
       content: `✅ Uploaded: ${result.document_name} (${result.chunks_created} chunks)`
     }])
+  }
+
+  const handleDownload = async (documentId, filename) => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/rag/download/pdf/${documentId}`)
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      window.URL.revokeObjectURL(url)
+    } catch (error) {
+      console.error('Download error:', error)
+    }
+  }
+
+  const handleDownloadMatched = async (sources) => {
+    try {
+      const params = new URLSearchParams({
+        sources: JSON.stringify(sources)
+      })
+      const response = await fetch(`http://localhost:8000/api/rag/download/matched?${params}`)
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'matched_documents.zip'
+      a.click()
+      window.URL.revokeObjectURL(url)
+    } catch (error) {
+      console.error('Download error:', error)
+    }
   }
 
   const handleSubmit = async (e) => {
@@ -35,15 +69,36 @@ function App() {
       const aiMessage = { 
         type: 'ai', 
         content: data.answer || 'No answer found',
-        chunks: data.chunks_used || 0
+        chunks: data.chunks_used || 0,
+        sources: data.sources || []
       }
       setMessages(prev => [...prev, aiMessage])
+      setLastSearch({ question, answer: data.answer, sources: data.sources })
     } catch (error) {
       setMessages(prev => [...prev, { type: 'error', content: 'Error connecting to API' }])
     }
 
     setQuestion('')
     setLoading(false)
+  }
+
+  const handleDownloadResults = async () => {
+    if (!lastSearch) return
+    
+    const params = new URLSearchParams({
+      question: lastSearch.question,
+      answer: lastSearch.answer,
+      sources: JSON.stringify(lastSearch.sources)
+    })
+    
+    const response = await fetch(`http://localhost:8000/api/rag/download/results?${params}`)
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'search_results.csv'
+    a.click()
+    window.URL.revokeObjectURL(url)
   }
 
   return (
@@ -64,6 +119,12 @@ function App() {
                 <div key={idx} className="file-item">
                   <span className="file-name">{file.document_name}</span>
                   <span className="file-chunks">{file.chunks_created} chunks</span>
+                  <button 
+                    onClick={() => handleDownload(file.document_id, file.document_name)}
+                    className="download-btn"
+                  >
+                    📥 Download
+                  </button>
                 </div>
               ))}
             </div>
@@ -92,6 +153,17 @@ function App() {
             Send
           </button>
         </form>
+
+        {lastSearch && (
+          <>
+            <button onClick={handleDownloadResults} className="download-btn">
+              📥 Download Search Results (CSV)
+            </button>
+            <button onClick={() => handleDownloadMatched(lastSearch.sources)} className="download-btn">
+              📥 Download Matched Documents (ZIP)
+            </button>
+          </>
+        )}
       </div>
     </div>
   )
