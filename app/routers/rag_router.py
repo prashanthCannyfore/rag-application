@@ -3,9 +3,14 @@ RAG (Retrieval-Augmented Generation) router - Week 7 Advanced Version
 """
 import os
 import uuid
+import io
+import zipfile
+import csv
+import json
+import pandas as pd
 from typing import Optional, List, Dict
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import StrOutputParser
@@ -23,8 +28,29 @@ from app.services.versioning_service import versioning_service
 from app.services.background_service import background_job_service, JobType
 from app.services.team_service import team_service
 from app.services.pdf_service import pdf_service
+from app.services.file_storage_service import file_storage_service
+from app.services.job_parser_service import job_parser_service
+from app.services.vector_db_service import VECTOR_TABLE
 from app.middleware.logging_config import logger
 
+"""
+RAG (Retrieval-Augmented Generation) router - Week 7 Advanced Version
+"""
+import os
+import uuid
+import io
+import zipfile
+import csv
+import json
+import pandas as pd
+from typing import Optional, List, Dict
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from dotenv import load_dotenv
 # Load environment
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.env')
 load_dotenv(dotenv_path=env_path)
@@ -97,6 +123,13 @@ async def upload_document(
         # Read file content
         content = await file.read()
         
+        # Extract metadata first
+        metadata = metadata_service.extract_metadata(file, document_name)
+        metadata["team_id"] = team_id
+        metadata["user_id"] = user_id
+
+        print("meta", metadata)
+        
         # Extract text based on file type
         file_type = metadata_service._get_file_type(file.filename)
         text = ""
@@ -106,18 +139,19 @@ async def upload_document(
             text = pdf_service.extract_text_from_pdf(content, file.filename)
             pdf_metadata = pdf_service.extract_metadata_from_pdf(content)
             print(f"Extracted {len(text)} chars from PDF, {pdf_metadata.get('pages', 'N/A')} pages")
+            # Store original PDF bytes for download
+            content_bytes = content
+            # Save PDF to disk for reliable downloads
+            file_path = file_storage_service.save_file(content, file.filename)
+            metadata["file_path"] = file_path
         else:
             # Process text-based files
             text = content.decode('utf-8', errors='ignore')
+            content_bytes = None
         
         if not text.strip():
             raise HTTPException(status_code=400, detail="Could not extract text from file")
         
-        # Extract metadata
-        metadata = metadata_service.extract_metadata(file, document_name)
-        metadata["team_id"] = team_id
-        metadata["user_id"] = user_id
-
         print("meta", metadata)
         
         # Create version 1
@@ -125,7 +159,8 @@ async def upload_document(
             document_id=document_id,
             content=text,
             metadata=metadata,
-            user_id=user_id
+            user_id=user_id,
+            content_bytes=content_bytes
         )
         
         # Create chunks
@@ -501,3 +536,326 @@ async def rag_health():
         },
         "cache": cache_stats
     }
+
+"""
+Download endpoints for resumes and search results
+"""
+import io
+import zipfile
+import csv
+import pandas as pd
+from fastapi.responses import StreamingResponse
+
+@router.get("/download/resume/{document_id}")
+async def download_resume(document_id: str):
+    """
+    Download individual resume PDF by document_id
+    """
+    try:
+        versions = await versioning_service.get_versions(document_id)
+        if not versions:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        latest = versions[-1]
+        
+        # If we have original bytes (PDF), return them
+        if latest.content_bytes:
+            filename = latest.metadata.get('filename', f'resume_{document_id}.pdf')
+            return StreamingResponse(
+                io.BytesIO(latest.content_bytes),
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
+            )
+        
+        # Check if file_path is stored in metadata (disk storage)
+        file_path = latest.metadata.get('file_path') if latest.metadata else None
+        if file_path:
+            # Normalize path for Windows
+            import pathlib
+            file_path_obj = pathlib.Path(file_path)
+            if file_path_obj.exists():
+                with open(file_path_obj, 'rb') as f:
+                    pdf_content = f.read()
+                filename = latest.metadata.get('filename', f'resume_{document_id}.pdf') if latest.metadata else f'resume_{document_id}.pdf'
+                return StreamingResponse(
+                    io.BytesIO(pdf_content),
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"}
+                )
+        
+        # Check if content starts with %PDF (actual PDF content)
+        content = latest.content
+        if content.startswith('%PDF'):
+            filename = latest.metadata.get('filename', f'resume_{document_id}.pdf') if latest.metadata else f'resume_{document_id}.pdf'
+            return StreamingResponse(
+                io.BytesIO(content.encode('latin-1')),
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
+            )
+        
+        # Otherwise, return the text content
+        filename = latest.metadata.get('filename', f'resume_{document_id}.txt') if latest.metadata else f'resume_{document_id}.txt'
+        
+        return StreamingResponse(
+            io.BytesIO(content.encode('utf-8')),
+            media_type="text/plain",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
+@router.get("/download/matched")
+async def download_matched(
+    sources: str = Query(...)
+):
+    """
+    Download matched resumes as ZIP
+    """
+    try:
+        # Parse sources from JSON string
+        import json
+        sources_list = json.loads(sources)
+        
+        # Create ZIP file in memory
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for source in sources_list:
+                doc_id = source.get('document_id')
+                if doc_id:
+                    versions = await versioning_service.get_versions(doc_id)
+                    if versions:
+                        latest = versions[-1]
+                        if latest.content_bytes:
+                            filename = latest.metadata.get('filename', f'resume_{doc_id}.pdf')
+                            zip_file.writestr(filename, latest.content_bytes)
+        
+        zip_buffer.seek(0)
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=matched_resumes.zip"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ZIP download failed: {str(e)}")
+
+@router.get("/download/csv")
+async def download_csv(
+    question: str = Query(...),
+    answer: str = Query(...),
+    sources: str = Query(...)
+):
+    """
+    Download search results as CSV
+    """
+    try:
+        import json
+        sources_list = json.loads(sources)
+        
+        # Create CSV in memory
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer)
+        writer.writerow(['Question', 'Answer'])
+        writer.writerow([question, answer])
+        writer.writerow([])
+        writer.writerow(['Sources'])
+        writer.writerow(['Document ID', 'Content', 'Similarity'])
+        
+        for source in sources_list:
+            writer.writerow([
+                source.get('document_id', ''),
+                source.get('content', '')[:200],
+                source.get('similarity', '')
+            ])
+        
+        csv_buffer.seek(0)
+        return StreamingResponse(
+            csv_buffer,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=search_results.csv"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"CSV download failed: {str(e)}")
+
+@router.get("/download/excel")
+async def download_excel(
+    question: str = Query(...),
+    answer: str = Query(...),
+    sources: str = Query(...)
+):
+    """
+    Download search results as Excel
+    """
+    try:
+        import json
+        sources_list = json.loads(sources)
+        
+        # Create Excel in memory using pandas
+        data = {
+            'Question': [question],
+            'Answer': [answer]
+        }
+        
+        df = pd.DataFrame(data)
+        
+        # Add sources sheet
+        sources_data = []
+        for source in sources_list:
+            sources_data.append({
+                'Document ID': source.get('document_id', ''),
+                'Content': source.get('content', '')[:200],
+                'Similarity': source.get('similarity', '')
+            })
+        
+        sources_df = pd.DataFrame(sources_data)
+        
+        # Write to Excel
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Results', index=False)
+            sources_df.to_excel(writer, sheet_name='Sources', index=False)
+        
+        excel_buffer.seek(0)
+        return StreamingResponse(
+            excel_buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=search_results.xlsx"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Excel download failed: {str(e)}")
+
+@router.post("/search/job")
+async def search_job(
+    job_description: str = Form(...),
+    max_results: Optional[int] = Form(10)
+):
+    """
+    Search for candidates matching job description
+    Combines CSV filtering with resume RAG search
+    """
+    try:
+        # Parse job description
+        job_req = job_parser_service.parse_job_description(job_description)
+        
+        # Get all documents from database
+        count = await vector_db_service.get_document_count()
+        if count == 0:
+            return {
+                "message": "No documents found. Please upload CSV and resumes first.",
+                "job_requirements": job_req,
+                "candidates": []
+            }
+        
+        # Get all document IDs
+        doc_ids = []
+        if vector_db_service.conn:
+            with vector_db_service.conn.cursor() as cur:
+                cur.execute(f"SELECT DISTINCT document_id FROM {VECTOR_TABLE}")
+                doc_ids = [row[0] for row in cur.fetchall()]
+        
+        # Match candidates
+        candidates = []
+        for doc_id in doc_ids:
+            try:
+                versions = await versioning_service.get_versions(doc_id)
+                if versions:
+                    latest = versions[-1]
+                    metadata = latest.metadata or {}
+                    
+                    # Check if this is a CSV file with structured data
+                    if metadata.get("file_type") == "text/csv":
+                        # Parse CSV content using csv module for proper handling
+                        import csv
+                        import io
+                        content = latest.content
+                        reader = csv.DictReader(io.StringIO(content))
+                        for row in reader:
+                            # Clean up any carriage returns in keys/values
+                            cleaned_row = {k.strip().replace('\r', ''): v.strip() for k, v in row.items()}
+                            match = job_parser_service.match_candidate(cleaned_row, job_req)
+                            if match["is_match"]:
+                                candidates.append({
+                                    **cleaned_row,
+                                    "match_score": match["score"],
+                                    "match_details": match,
+                                    "document_id": doc_id
+                                })
+                    else:
+                        # This is a resume - use RAG search
+                        resume_text = latest.content
+                        match = job_parser_service.match_candidate(
+                            {"skills": resume_text, "role": metadata.get("filename", "")},
+                            job_req
+                        )
+                        if match["is_match"]:
+                            candidates.append({
+                                "document_id": doc_id,
+                                "filename": metadata.get("filename", ""),
+                                "file_path": metadata.get("file_path"),
+                                "match_score": match["score"],
+                                "match_details": match
+                            })
+            except Exception as e:
+                print(f"Error processing document {doc_id}: {e}")
+        
+        # Sort by match score
+        candidates.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+        
+        # Limit results
+        candidates = candidates[:max_results]
+        
+        # Generate summary using LLM
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=0.2,
+            google_api_key=GOOGLE_API_KEY
+        )
+        
+        # Build context from candidates
+        context_parts = []
+        for i, candidate in enumerate(candidates, 1):
+            if "role" in candidate:
+                context_parts.append(f"{i}. {candidate.get('name', 'Unknown')}")
+                context_parts.append(f"   Role: {candidate.get('role', 'N/A')}")
+                context_parts.append(f"   Skills: {candidate.get('skills', 'N/A')}")
+                context_parts.append(f"   Location: {candidate.get('location', 'N/A')}")
+                context_parts.append(f"   Cost: {candidate.get('cost', 'N/A')}")
+            else:
+                context_parts.append(f"{i}. {candidate.get('filename', 'Unknown')}")
+                context_parts.append(f"   Match Score: {candidate.get('match_score', 0)}")
+        
+        context = "\n".join(context_parts)
+        
+        # Generate answer
+        prompt = f"""
+        Based on the following job requirements and matching candidates, provide a summary.
+        
+        Job Requirements:
+        - Role: {job_req.get('role', 'N/A')}
+        - Skills: {', '.join(job_req.get('skills', []))}
+        - Location: {job_req.get('location', 'N/A')}
+        - Cost: {job_req.get('cost', 'N/A')}
+        
+        Matching Candidates:
+        {context}
+        
+        Provide a concise summary of the matching candidates.
+        """
+        
+        answer = await llm.ainvoke(prompt)
+        
+        return {
+            "message": f"Found {len(candidates)} matching candidates",
+            "job_requirements": job_req,
+            "candidates": candidates,
+            "answer": answer.content if hasattr(answer, 'content') else str(answer)
+        }
+        
+    except Exception as e:
+        logger.error(f"Job search error: {e}")
+        raise HTTPException(status_code=500, detail=f"Job search failed: {str(e)}")
