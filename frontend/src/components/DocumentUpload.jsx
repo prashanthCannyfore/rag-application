@@ -8,6 +8,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
   const [uploading, setUploading] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [error, setError] = useState(null);
+  const [uploadResults, setUploadResults] = useState([]);
 
   const handleDragOver = (e) => {
     e.preventDefault();
@@ -45,12 +46,16 @@ export default function DocumentUpload({ onUploadSuccess }) {
 
     setUploading(true);
     setError(null);
+    setUploadResults([]);
 
     try {
+      const results = [];
       for (const file of selectedFiles) {
         const result = await uploadDocument(file, file.name);
+        results.push(result);
         onUploadSuccess(result);
       }
+      setUploadResults(results);
       setSelectedFiles([]);
     } catch (err) {
       setError(err.response?.data?.detail || 'Upload failed');
@@ -139,6 +144,32 @@ export default function DocumentUpload({ onUploadSuccess }) {
       {error && (
         <div className="p-2 bg-red-50 border border-red-200 rounded-lg">
           <p className="text-xs text-red-600">{error}</p>
+        </div>
+      )}
+
+      {uploadResults.length > 0 && (
+        <div className="space-y-2">
+          {uploadResults.map((result, index) => (
+            <div key={index} className="p-3 bg-green-50 border border-green-200 rounded-lg">
+              <div className="flex items-start gap-2">
+                <div className="text-green-600 mt-0.5">✓</div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-green-900 mb-1">
+                    {result.document_name}
+                  </p>
+                  <div className="text-xs text-green-700 space-y-0.5">
+                    <p>📊 Chunks created: {result.chunks_created}</p>
+                    <p>📝 Text length: {result.text_length} characters</p>
+                    {result.text_preview && (
+                      <p className="text-green-600 italic mt-1">
+                        Preview: "{result.text_preview.substring(0, 100)}..."
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

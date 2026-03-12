@@ -207,7 +207,14 @@ async def upload_document(
             "document_name": document_name or file.filename,
             "chunks_created": len(chunks),
             "version": 1,
-            "metadata": metadata
+            "metadata": metadata,
+            "text_preview": text[:300] + "..." if len(text) > 300 else text,
+            "text_length": len(text),
+            "validation": {
+                "has_content": len(text.strip()) > 0,
+                "content_cleaned": True,
+                "file_type": file_type
+            }
         }
         
     except HTTPException:
@@ -955,37 +962,88 @@ async def search_job(
                                 
                                 if resume_doc_id and best_match_score >= 60:
                                     logger.info(f"Matched CSV candidate '{candidate_name_full}' to PDF resume (score: {best_match_score})")
+                                    candidates.append({
+                                        **cleaned_row,
+                                        "match_score": match["score"],
+                                        "match_details": match,
+                                        "document_id": resume_doc_id,
+                                        "csv_document_id": doc_id,
+                                        "has_resume": True,
+                                        "resume_match_score": best_match_score,
+                                        "is_pdf": False,
+                                        "resume_document_id": resume_doc_id
+                                    })
                                 else:
-                                    logger.warning(f"No PDF resume found for '{candidate_name_full}' (best score: {best_match_score})")
-                                
-                                candidates.append({
-                                    **cleaned_row,
-                                    "match_score": match["score"],
-                                    "match_details": match,
-                                    "document_id": resume_doc_id or doc_id,  # Use PDF doc_id if found, else CSV doc_id
-                                    "csv_document_id": doc_id,  # Keep original CSV doc_id
-                                    "has_resume": resume_doc_id is not None,
-                                    "resume_match_score": best_match_score if resume_doc_id else 0,
-                                    "is_pdf": False,  # This is a CSV candidate
-                                    "resume_document_id": resume_doc_id  # PDF document ID if matched
-                                })
+                                    logger.debug(f"No PDF resume found for '{candidate_name_full}' (best score: {best_match_score})")
                     else:
-                        # This is a resume - use RAG search
-                        resume_text = latest.content
-                        match = job_parser_service.match_candidate(
-                            {"skills": resume_text, "role": metadata.get("filename", "")},
-                            job_req
-                        )
-                        if match["is_match"]:
-                            candidates.append({
-                                "document_id": doc_id,
-                                "filename": metadata.get("filename", ""),
-                                "file_path": metadata.get("file_path"),
-                                "match_score": match["score"],
-                                "match_details": match,
-                                "has_resume": True,
-                                "is_pdf": True  # This is a PDF resume
-                            })
+                        # This is a resume PDF - check if it matches job requirements
+                        try:
+                            resume_text = latest.content
+                            if not resume_text:
+                                logger.debug(f"No content in PDF: {metadata.get('filename')}")
+                                continue
+                            
+                            resume_text_lower = resume_text.lower()
+                            filename = metadata.get("filename", "").lower()
+                            
+                            # Extract job role and skills - handle None values
+                            job_role = (job_req.get("role") or "").lower()
+                            job_skills = [s.lower() for s in (job_req.get("skills") or [])]
+                            raw_text = (job_req.get("raw_text") or "").lower()
+                            
+                            # Calculate match score based on keyword presence
+                            score = 0
+                            matches = []
+                            
+                            # Check for role keywords in resume
+                            if job_role:
+                                role_keywords = [k for k in job_role.split() if len(k) > 2]
+                                for keyword in role_keywords:
+                                    if keyword in resume_text_lower:
+                                        score += 15
+                                        matches.append(f"Role keyword: {keyword}")
+                            
+                            # Check for skills in resume
+                            for skill in job_skills:
+                                if skill and skill in resume_text_lower:
+                                    score += 20
+                                    matches.append(f"Skill: {skill}")
+                            
+                            # If no role parsed, check raw text for keywords
+                            if not job_role and raw_text:
+                                raw_keywords = [k for k in raw_text.split() if len(k) > 2]
+                                for keyword in raw_keywords:
+                                    if keyword in resume_text_lower:
+                                        score += 10
+                                        matches.append(f"Keyword: {keyword}")
+                            
+                            # Check filename for keyword match (fallback)
+                            if score == 0 and raw_text:
+                                raw_keywords = [k for k in raw_text.split() if len(k) > 2]
+                                for keyword in raw_keywords:
+                                    if keyword in filename:
+                                        score += 5
+                                        matches.append(f"Keyword in filename: {keyword}")
+                            
+                            # If we found any matches, add the candidate
+                            if score > 0:
+                                candidate_obj = {
+                                    "document_id": doc_id,
+                                    "filename": metadata.get("filename", ""),
+                                    "name": metadata.get("filename", "").replace('.pdf', '').replace('_Profile', '').replace('_profile', '').replace('_', ' '),
+                                    "file_path": metadata.get("file_path"),
+                                    "match_score": min(score, 100),
+                                    "match_details": {"matches": matches, "score": score},
+                                    "has_resume": True,
+                                    "is_pdf": True,
+                                    "resume_document_id": doc_id
+                                }
+                                candidates.append(candidate_obj)
+                                logger.info(f"Matched PDF resume: {metadata.get('filename')} (doc_id: {doc_id}, score: {score}, matches: {matches})")
+                            else:
+                                logger.debug(f"No match for PDF: {metadata.get('filename')} (raw_text: {raw_text})")
+                        except Exception as e:
+                            logger.error(f"Error processing PDF {doc_id}: {e}", exc_info=True)
             except Exception as e:
                 logger.error(f"Error processing document {doc_id}: {e}")
         

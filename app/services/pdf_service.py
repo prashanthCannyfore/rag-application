@@ -42,18 +42,21 @@ class PDFService:
             filename: Optional filename for logging
             
         Returns:
-            Extracted text from PDF
+            Extracted and cleaned text from PDF
         """
         if self.pdf_library == "pdfplumber":
-            return self._extract_with_pdfplumber(pdf_content)
+            text = self._extract_with_pdfplumber(pdf_content)
         elif self.pdf_library == "pypdf":
-            return self._extract_with_pypdf(pdf_content)
+            text = self._extract_with_pypdf(pdf_content)
         elif self.pdf_library == "pypdf2":
-            return self._extract_with_pypdf2(pdf_content)
+            text = self._extract_with_pypdf2(pdf_content)
         else:
             raise ImportError(
                 "No PDF library available. Install with: pip install pdfplumber or pip install pypdf"
             )
+        
+        # Clean and validate the extracted text
+        return self._clean_text(text)
     
     def _extract_with_pdfplumber(self, pdf_content: bytes) -> str:
         """Extract text using pdfplumber (best for text extraction)"""
@@ -156,6 +159,64 @@ class PDFService:
             "producer": info.producer if info else None,
             "pages": len(reader.pages)
         }
+    
+    def _clean_text(self, text: str) -> str:
+        """
+        Clean and validate extracted text from PDF
+        
+        Removes:
+        - Multiple consecutive dashes/underscores (profile separators)
+        - Excessive whitespace
+        - Empty lines
+        - Special formatting characters
+        
+        Args:
+            text: Raw extracted text
+            
+        Returns:
+            Cleaned text
+        """
+        import re
+        
+        if not text:
+            return ""
+        
+        # Remove lines that are just dashes, underscores, or equals signs
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            # Skip lines that are mostly dashes/underscores/equals
+            if re.match(r'^[\s\-_=]{5,}$', line):
+                continue
+            
+            # Skip lines with excessive dashes in the middle (like "Profile: -----")
+            if re.search(r':\s*[\-_=]{5,}', line):
+                # Keep the part before the dashes
+                line = re.sub(r':\s*[\-_=]{5,}.*$', ':', line)
+            
+            # Clean up the line
+            line = line.strip()
+            
+            # Skip empty lines
+            if not line:
+                continue
+            
+            cleaned_lines.append(line)
+        
+        # Join lines and clean up excessive whitespace
+        text = '\n'.join(cleaned_lines)
+        
+        # Remove multiple consecutive newlines
+        text = re.sub(r'\n\n+', '\n\n', text)
+        
+        # Remove excessive spaces
+        text = re.sub(r' {2,}', ' ', text)
+        
+        # Remove special characters that are just formatting
+        text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', text)
+        
+        return text.strip()
 
 
 # Singleton instance

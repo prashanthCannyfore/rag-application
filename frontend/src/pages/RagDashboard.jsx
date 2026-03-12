@@ -74,10 +74,59 @@ export default function RagDashboard() {
     setLoading(true);
 
     try {
-      const response = await searchRAG(question, selectedDoc?.id);
-      const aiMessage = { role: 'assistant', content: response.answer };
-      setMessages(prev => [...prev, aiMessage]);
-      setSources(response.sources || []);
+      // Check if this is a job search query
+      const jobSearchKeywords = ['find', 'search', 'candidates', 'match', 'looking for', 'need', 'hire', 'job', 'role', 'position', 'developer', 'react', 'java', 'python', 'bangalore', 'location', 'cost', 'skills', 'experience'];
+      const isJobSearch = jobSearchKeywords.some(keyword => question.toLowerCase().includes(keyword));
+
+      if (isJobSearch) {
+        // Handle as job search
+        const formData = new FormData();
+        formData.append('job_description', question);
+        formData.append('max_results', 10);
+        formData.append('strict_location', false);
+
+        const response = await fetch('http://localhost:8000/api/rag/search/job', {
+          method: 'POST',
+          body: formData
+        });
+
+        if (!response.ok) throw new Error('Job search failed');
+        
+        const data = await response.json();
+        
+        // Build AI response
+        const candidateList = (data.candidates || [])
+          .slice(0, 5)
+          .map(c => `• ${c.name || c.filename} - ${c.role || 'N/A'} (Match: ${Math.round(c.match_score || 0)}%, Location: ${c.location || 'N/A'}, Cost: ₹${c.cost || 'N/A'})`)
+          .join('\n');
+
+        const aiMessage = {
+          role: 'assistant',
+          content: `Found ${data.candidates?.length || 0} matching candidates:\n\n${candidateList || 'No candidates found matching your criteria.'}\n\nYou can download the resumes from the Sources panel on the right.`
+        };
+        setMessages(prev => [...prev, aiMessage]);
+
+        // Populate sources with matched resumes
+        const matchedSources = (data.candidates || [])
+          .filter(c => c.has_resume)
+          .map((c, idx) => ({
+            content: `📄 ${c.name || c.filename}`,
+            document_id: c.resume_document_id || c.document_id,
+            similarity: (c.match_score || 0) / 100,
+            chunk_index: idx,
+            file_type: 'application/pdf',
+            candidate_name: c.name || c.filename,
+            candidate_role: c.role || 'Resume'
+          }));
+        
+        setSources(matchedSources);
+      } else {
+        // Handle as regular RAG search
+        const response = await searchRAG(question, selectedDoc?.id);
+        const aiMessage = { role: 'assistant', content: response.answer };
+        setMessages(prev => [...prev, aiMessage]);
+        setSources(response.sources || []);
+      }
     } catch (error) {
       const errorMessage = {
         role: 'assistant',
@@ -91,50 +140,6 @@ export default function RagDashboard() {
 
   const downloadResume = (documentId) => {
     window.open(`http://localhost:8000/api/rag/download/resume/${documentId}`, '_blank');
-  };
-
-  const handleJobSearch = async (e) => {
-    e.preventDefault();
-    if (!jobDescription.trim() || jobSearchLoading) return;
-
-    setJobSearchLoading(true);
-    try {
-      const formData = new FormData();
-      formData.append('job_description', jobDescription);
-      formData.append('max_results', 10);
-      formData.append('strict_location', true);
-
-      const response = await fetch('http://localhost:8000/api/rag/search/job', {
-        method: 'POST',
-        body: formData
-      });
-
-      if (!response.ok) throw new Error('Job search failed');
-      
-      const data = await response.json();
-      setCandidates(data.candidates || []);
-      
-      // Populate sources with matched resumes
-      const matchedSources = (data.candidates || [])
-        .filter(c => c.has_resume && c.is_pdf)
-        .map((c, idx) => ({
-          content: `📄 ${c.name || c.filename}`,
-          document_id: c.document_id,
-          similarity: (c.match_score || 0) / 100,
-          chunk_index: idx,
-          file_type: 'application/pdf',
-          candidate_name: c.name || c.filename,
-          candidate_role: c.role || 'Resume'
-        }));
-      
-      setSources(matchedSources);
-      setJobDescription('');
-    } catch (error) {
-      console.error('Job search error:', error);
-      alert('Failed to search candidates');
-    } finally {
-      setJobSearchLoading(false);
-    }
   };
 
   return (
