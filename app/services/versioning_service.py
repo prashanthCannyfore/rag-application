@@ -38,8 +38,68 @@ class VersioningService:
             except Exception:
                 pass
         
-        # In-memory storage for demo
+        # In-memory storage with file persistence
         self.versions: Dict[str, List[DocumentVersion]] = {}
+        self.persistence_file = "uploads/versions_metadata.json"
+        self._load_from_disk()
+    
+    def _load_from_disk(self):
+        """Load versions from disk on startup"""
+        import json
+        from pathlib import Path
+        
+        if Path(self.persistence_file).exists():
+            try:
+                with open(self.persistence_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                for doc_id, versions_data in data.items():
+                    self.versions[doc_id] = []
+                    for v_data in versions_data:
+                        version = DocumentVersion(
+                            id=v_data['id'],
+                            document_id=v_data['document_id'],
+                            version=v_data['version'],
+                            content=v_data['content'],
+                            content_bytes=None,  # Don't store bytes in JSON
+                            metadata=v_data.get('metadata', {}),
+                            created_at=datetime.fromisoformat(v_data['created_at']),
+                            created_by=v_data.get('created_by')
+                        )
+                        self.versions[doc_id].append(version)
+                
+                print(f"Loaded {len(self.versions)} documents from disk")
+            except Exception as e:
+                print(f"Error loading versions from disk: {e}")
+    
+    def _save_to_disk(self):
+        """Save versions to disk"""
+        import json
+        from pathlib import Path
+        
+        # Create directory if it doesn't exist
+        Path(self.persistence_file).parent.mkdir(parents=True, exist_ok=True)
+        
+        # Convert to JSON-serializable format
+        data = {}
+        for doc_id, versions in self.versions.items():
+            data[doc_id] = []
+            for v in versions:
+                data[doc_id].append({
+                    'id': v.id,
+                    'document_id': v.document_id,
+                    'version': v.version,
+                    'content': v.content,
+                    'metadata': v.metadata,
+                    'created_at': v.created_at.isoformat(),
+                    'created_by': v.created_by
+                })
+        
+        try:
+            with open(self.persistence_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving versions to disk: {e}")
     
     async def create_version(
         self,
@@ -73,6 +133,9 @@ class VersioningService:
             self.versions[document_id] = []
         
         self.versions[document_id].append(version)
+        
+        # Persist to disk
+        self._save_to_disk()
         
         return version
     
