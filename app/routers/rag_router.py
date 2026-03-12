@@ -317,11 +317,14 @@ async def rag_search(request: RAGRequest):
             content = chunk.get("content", "")
             if content:
                 context_parts.append(content)
+                # Get file type from metadata if available
+                file_type = chunk.get("metadata", {}).get("file_type", "application/pdf") if isinstance(chunk.get("metadata"), dict) else "application/pdf"
                 sources.append({
                     "content": content[:200] + "..." if len(content) > 200 else content,
                     "document_id": chunk.get("document_id", "unknown"),
                     "similarity": chunk.get("similarity", chunk.get("final_score", 0)),
-                    "chunk_index": chunk.get("chunk_index", i)
+                    "chunk_index": chunk.get("chunk_index", i),
+                    "file_type": file_type
                 })
         
         context = "\n\n".join(context_parts)
@@ -962,7 +965,9 @@ async def search_job(
                                     "document_id": resume_doc_id or doc_id,  # Use PDF doc_id if found, else CSV doc_id
                                     "csv_document_id": doc_id,  # Keep original CSV doc_id
                                     "has_resume": resume_doc_id is not None,
-                                    "resume_match_score": best_match_score if resume_doc_id else 0
+                                    "resume_match_score": best_match_score if resume_doc_id else 0,
+                                    "is_pdf": False,  # This is a CSV candidate
+                                    "resume_document_id": resume_doc_id  # PDF document ID if matched
                                 })
                     else:
                         # This is a resume - use RAG search
@@ -978,7 +983,8 @@ async def search_job(
                                 "file_path": metadata.get("file_path"),
                                 "match_score": match["score"],
                                 "match_details": match,
-                                "has_resume": True
+                                "has_resume": True,
+                                "is_pdf": True  # This is a PDF resume
                             })
             except Exception as e:
                 logger.error(f"Error processing document {doc_id}: {e}")

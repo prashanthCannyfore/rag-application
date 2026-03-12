@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { Upload, Send, Trash2, Download } from 'lucide-react';
+import { Upload, Send, Trash2, Download, Briefcase } from 'lucide-react';
 import DocumentUpload from '../components/DocumentUpload';
+import CandidateResult from '../components/CandidateResult';
 import { listDocuments, searchRAG, deleteDocument } from '../services/api';
 
 export default function RagDashboard() {
@@ -11,6 +12,10 @@ export default function RagDashboard() {
   const [loading, setLoading] = useState(false);
   const [input, setInput] = useState('');
   const [showUpload, setShowUpload] = useState(false);
+  const [showJobSearch, setShowJobSearch] = useState(false);
+  const [jobDescription, setJobDescription] = useState('');
+  const [candidates, setCandidates] = useState([]);
+  const [jobSearchLoading, setJobSearchLoading] = useState(false);
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -86,6 +91,50 @@ export default function RagDashboard() {
 
   const downloadResume = (documentId) => {
     window.open(`http://localhost:8000/api/rag/download/resume/${documentId}`, '_blank');
+  };
+
+  const handleJobSearch = async (e) => {
+    e.preventDefault();
+    if (!jobDescription.trim() || jobSearchLoading) return;
+
+    setJobSearchLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('job_description', jobDescription);
+      formData.append('max_results', 10);
+      formData.append('strict_location', true);
+
+      const response = await fetch('http://localhost:8000/api/rag/search/job', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) throw new Error('Job search failed');
+      
+      const data = await response.json();
+      setCandidates(data.candidates || []);
+      
+      // Populate sources with matched resumes
+      const matchedSources = (data.candidates || [])
+        .filter(c => c.has_resume && c.is_pdf)
+        .map((c, idx) => ({
+          content: `📄 ${c.name || c.filename}`,
+          document_id: c.document_id,
+          similarity: (c.match_score || 0) / 100,
+          chunk_index: idx,
+          file_type: 'application/pdf',
+          candidate_name: c.name || c.filename,
+          candidate_role: c.role || 'Resume'
+        }));
+      
+      setSources(matchedSources);
+      setJobDescription('');
+    } catch (error) {
+      console.error('Job search error:', error);
+      alert('Failed to search candidates');
+    } finally {
+      setJobSearchLoading(false);
+    }
   };
 
   return (
@@ -172,11 +221,55 @@ export default function RagDashboard() {
         </div>
       </div>
 
-      {/* Center - Chat */}
+      {/* Center - Chat or Job Search */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', backgroundColor: '#fff' }}>
-        {/* Messages */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {messages.length === 0 ? (
+        {/* Tab Buttons */}
+        <div style={{
+          display: 'flex',
+          gap: '0',
+          borderBottom: '1px solid #e0e0e0',
+          backgroundColor: '#f9f9f9',
+          padding: '0'
+        }}>
+          <button
+            onClick={() => { setShowJobSearch(false); setCandidates([]); setSources([]); }}
+            style={{
+              flex: 1,
+              padding: '12px 16px',
+              backgroundColor: !showJobSearch ? '#fff' : '#f9f9f9',
+              border: 'none',
+              borderBottom: !showJobSearch ? '2px solid #2563eb' : 'none',
+              cursor: 'pointer',
+              fontSize: '14px',
+              fontWeight: '500',
+              color: !showJobSearch ? '#2563eb' : '#666'
+            }}
+          >
+            💬 Chat
+          </button>
+          <button
+            onClick={() => { setShowJobSearch(true); setMessages([]); setSources([]); }}
+            style={{
+              flex: 1,
+              padding: '12px 16px',
+              backgroundColor: showJobSearch ? '#fff' : '#f9f9f9',
+              border: 'none',
+              borderBottom: showJobSearch ? '2px solid #2563eb' : 'none',
+              cursor: 'pointer',
+              fontSize: '14px',
+              fontWeight: '500',
+              color: showJobSearch ? '#2563eb' : '#666'
+            }}
+          >
+            <Briefcase size={14} style={{ display: 'inline', marginRight: '6px' }} />
+            Job Search
+          </button>
+        </div>
+
+        {/* Chat View */}
+        {!showJobSearch && (
+          <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {messages.length === 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center' }}>
               <div style={{ fontSize: '48px', marginBottom: '16px' }}>💬</div>
               <h2 style={{ fontSize: '24px', fontWeight: 'bold', margin: '0 0 8px 0' }}>Start a conversation</h2>
@@ -222,9 +315,11 @@ export default function RagDashboard() {
               <div ref={messagesEndRef} />
             </>
           )}
-        </div>
+          </div>
+        )}
 
         {/* Input */}
+        {!showJobSearch && (
         <div style={{ padding: '20px', borderTop: '1px solid #e0e0e0', backgroundColor: '#fff' }}>
           <form onSubmit={handleSendMessage} style={{ display: 'flex', gap: '12px' }}>
             <input
@@ -269,13 +364,98 @@ export default function RagDashboard() {
             </button>
           </form>
         </div>
+        )}
+
+        {/* Job Search View */}
+        {showJobSearch && (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+          {/* Results */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+            {candidates.length === 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center' }}>
+                <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔍</div>
+                <h2 style={{ fontSize: '24px', fontWeight: 'bold', margin: '0 0 8px 0' }}>Find Candidates</h2>
+                <p style={{ fontSize: '14px', color: '#666', margin: '0', maxWidth: '400px' }}>
+                  Enter a job description to search for matching candidates from uploaded resumes and CSV data
+                </p>
+              </div>
+            ) : (
+              <div>
+                <h3 style={{ fontSize: '16px', fontWeight: '600', margin: '0 0 16px 0', color: '#1f2937' }}>
+                  Found {candidates.length} matching candidate{candidates.length !== 1 ? 's' : ''}
+                </h3>
+                {candidates.map((candidate, index) => (
+                  <CandidateResult
+                    key={index}
+                    candidate={candidate}
+                    onDownload={downloadResume}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Job Search Input */}
+          <div style={{ padding: '20px', borderTop: '1px solid #e0e0e0', backgroundColor: '#fff' }}>
+            <form onSubmit={handleJobSearch} style={{ display: 'flex', gap: '12px' }}>
+              <textarea
+                value={jobDescription}
+                onChange={(e) => setJobDescription(e.target.value)}
+                placeholder="Paste job description here..."
+                disabled={jobSearchLoading}
+                style={{
+                  flex: 1,
+                  padding: '12px 16px',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  fontFamily: 'inherit',
+                  outline: 'none',
+                  opacity: jobSearchLoading ? 0.5 : 1,
+                  minHeight: '80px',
+                  resize: 'vertical'
+                }}
+                onFocus={(e) => e.target.style.borderColor = '#2563eb'}
+                onBlur={(e) => e.target.style.borderColor = '#d1d5db'}
+              />
+              <button
+                type="submit"
+                disabled={jobSearchLoading || !jobDescription.trim()}
+                style={{
+                  padding: '12px 24px',
+                  backgroundColor: '#2563eb',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: jobSearchLoading || !jobDescription.trim() ? 'not-allowed' : 'pointer',
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  opacity: jobSearchLoading || !jobDescription.trim() ? 0.5 : 1,
+                  height: 'fit-content'
+                }}
+              >
+                <Briefcase size={16} />
+                Search
+              </button>
+            </form>
+          </div>
+        </div>
+        )}
+
       </div>
 
       {/* Right Sidebar - Sources */}
       <div style={{ width: '350px', backgroundColor: '#f9f9f9', borderLeft: '1px solid #e0e0e0', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
         <div style={{ padding: '20px', borderBottom: '1px solid #e0e0e0', backgroundColor: '#fff' }}>
-          <h2 style={{ fontSize: '18px', fontWeight: 'bold', margin: '0 0 5px 0' }}>Sources</h2>
-          <p style={{ fontSize: '12px', color: '#666', margin: '0' }}>{sources.length} relevant chunks</p>
+          <h2 style={{ fontSize: '18px', fontWeight: 'bold', margin: '0 0 5px 0' }}>
+            {showJobSearch ? 'Matched Resumes' : 'Sources'}
+          </h2>
+          <p style={{ fontSize: '12px', color: '#666', margin: '0' }}>
+            {showJobSearch ? `${sources.length} resume${sources.length !== 1 ? 's' : ''}` : `${sources.length} relevant chunks`}
+          </p>
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '15px' }}>
@@ -287,7 +467,16 @@ export default function RagDashboard() {
               return (
                 <div key={index} style={{ marginBottom: '12px', padding: '12px', backgroundColor: '#fff', border: '1px solid #e0e0e0', borderRadius: '6px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                    <p style={{ fontSize: '12px', fontWeight: '500', margin: '0', color: '#666' }}>Source {index + 1}</p>
+                    <div>
+                      <p style={{ fontSize: '12px', fontWeight: '600', margin: '0 0 2px 0', color: '#1f2937' }}>
+                        {source.candidate_name || `Source ${index + 1}`}
+                      </p>
+                      {source.candidate_role && (
+                        <p style={{ fontSize: '11px', margin: '0', color: '#6b7280' }}>
+                          {source.candidate_role}
+                        </p>
+                      )}
+                    </div>
                     <span style={{
                       fontSize: '11px',
                       fontWeight: '500',
@@ -302,27 +491,29 @@ export default function RagDashboard() {
                   <p style={{ fontSize: '12px', color: '#333', margin: '0 0 8px 0', lineHeight: '1.4', maxHeight: '60px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {source.content}
                   </p>
-                  <button
-                    onClick={() => downloadResume(source.document_id)}
-                    style={{
-                      width: '100%',
-                      padding: '6px 12px',
-                      backgroundColor: '#dbeafe',
-                      color: '#2563eb',
-                      border: 'none',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontSize: '12px',
-                      fontWeight: '500',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '6px'
-                    }}
-                  >
-                    <Download size={14} />
-                    Download
-                  </button>
+                  {source.file_type !== 'text/csv' && (
+                    <button
+                      onClick={() => downloadResume(source.document_id)}
+                      style={{
+                        width: '100%',
+                        padding: '6px 12px',
+                        backgroundColor: '#dbeafe',
+                        color: '#2563eb',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontSize: '12px',
+                        fontWeight: '500',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '6px'
+                      }}
+                    >
+                      <Download size={14} />
+                      Download
+                    </button>
+                  )}
                 </div>
               );
             })
