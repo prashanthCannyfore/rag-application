@@ -223,39 +223,6 @@ async def upload_document(
         logger.error(f"Upload error: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-@router.post("/upload/batch")
-async def batch_upload(
-    files: List[UploadFile] = File(...),
-    document_names: Optional[List[str]] = Form(None),
-    team_id: Optional[str] = Form(None),
-    user_id: Optional[str] = Form(None)
-):
-    """
-    Batch upload multiple documents
-    """
-    try:
-        # Create background job
-        job = background_job_service.create_job(
-            job_type=JobType.BATCH_PROCESS,
-            payload={
-                "files_count": len(files),
-                "document_names": document_names,
-                "team_id": team_id,
-                "user_id": user_id
-            },
-            user_id=user_id
-        )
-        
-        return {
-            "job_id": job.id,
-            "status": "pending",
-            "documents_count": len(files)
-        }
-        
-    except Exception as e:
-        logger.error(f"Batch upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Batch upload failed: {str(e)}")
-
 @router.post("/search", response_model=RAGResponse)
 async def rag_search(request: RAGRequest):
     """
@@ -393,449 +360,15 @@ async def rag_search(request: RAGRequest):
         logger.error(f"RAG search error: {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
-@router.get("/documents")
-async def list_documents(
-    team_id: Optional[str] = None,
-    user_id: Optional[str] = None
-):
-    """List all documents, optionally filtered by team"""
-    try:
-        if team_id and user_id:
-            # Get team documents
-            docs = await team_service.get_team_documents(team_id, user_id)
-            return {
-                "documents": [
-                    {
-                        "id": doc.id,
-                        "name": doc.name,
-                        "team_id": doc.team_id,
-                        "uploaded_by": doc.uploaded_by,
-                        "created_at": doc.created_at.isoformat()
-                    }
-                    for doc in docs
-                ],
-                "team_id": team_id
-            }
-        
-        count = await vector_db_service.get_document_count()
-        return {
-            "total_documents": count,
-            "message": "Use team_id parameter for team-specific documents"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/documents/{document_id}/versions")
-async def get_document_versions(document_id: str):
-    """Get all versions of a document"""
-    try:
-        versions = await versioning_service.get_versions(document_id)
-        return {
-            "document_id": document_id,
-            "versions": [
-                {
-                    "version": v.version,
-                    "created_at": v.created_at.isoformat(),
-                    "content_length": len(v.content)
-                }
-                for v in versions
-            ]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/documents/{document_id}/rollback/{version}")
-async def rollback_document(document_id: str, version: int):
-    """Rollback to a specific version"""
-    try:
-        new_version = await versioning_service.rollback(document_id, version)
-        return {
-            "message": f"Rolled back to version {version}",
-            "new_version": new_version.version
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/teams")
-async def list_teams(user_id: str = Query(...)):
-    """List all teams for a user"""
-    try:
-        teams = await team_service.get_user_teams(user_id)
-        return {
-            "teams": [
-                {
-                    "id": team.id,
-                    "name": team.name,
-                    "member_count": len(team.members),
-                    "created_at": team.created_at.isoformat()
-                }
-                for team in teams
-            ]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/teams")
-async def create_team(
-    name: str = Query(...),
-    owner_id: str = Query(...)
-):
-    """Create a new team"""
-    try:
-        team = await team_service.create_team(name, owner_id)
-        return {
-            "id": team.id,
-            "name": team.name,
-            "owner_id": team.owner_id,
-            "created_at": team.created_at.isoformat()
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/jobs/{job_id}")
-async def get_job_status(job_id: str):
-    """Get background job status"""
-    try:
-        return background_job_service.get_job_status(job_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/cache/stats")
-async def get_cache_stats():
-    """Get cache statistics"""
-    return cache_service.get_stats()
-
-@router.delete("/cache")
-async def clear_cache():
-    """Clear all cached data"""
-    cache_service.clear()
-    return {"message": "Cache cleared"}
-
-@router.delete("/documents/{document_id}")
-async def delete_document(document_id: str):
-    """Delete a document and its versions"""
-    try:
-        # Invalidate cache
-        summary_cache_service.invalidate_document(document_id)
-        
-        # Delete from vector DB
-        success = await vector_db_service.delete_document(document_id)
-        
-        if success:
-            return {"message": f"Document {document_id} deleted successfully"}
-        raise HTTPException(status_code=404, detail="Document not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/health")
-async def rag_health():
-    """RAG service health check"""
-    cache_stats = cache_service.get_stats()
-    
-    return {
-        "status": "healthy",
-        "service": "rag-week7",
-        "features": {
-            "embeddings": "configured" if GOOGLE_API_KEY else "missing",
-            "vector_db": "configured" if vector_db_service.supabase else "demo mode",
-            "reranking": "enabled",
-            "summarization": "enabled",
-            "metadata_filtering": "enabled",
-            "versioning": "enabled",
-            "team_isolation": "enabled",
-            "caching": "enabled",
-            "batch_processing": "enabled",
-            "pdf_support": "enabled"
-        },
-        "cache": cache_stats
-    }
-
-@router.get("/debug/document/{document_id}")
-async def debug_document(document_id: str):
-    """Debug endpoint to check document storage"""
-    try:
-        versions = await versioning_service.get_versions(document_id)
-        if not versions:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        latest = versions[-1]
-        metadata = latest.metadata or {}
-        
-        from pathlib import Path
-        file_path = metadata.get('file_path')
-        file_exists = False
-        file_size = 0
-        file_is_pdf = False
-        
-        if file_path:
-            file_path_obj = Path(file_path)
-            file_exists = file_path_obj.exists()
-            if file_exists:
-                file_size = file_path_obj.stat().st_size
-                with open(file_path_obj, 'rb') as f:
-                    first_bytes = f.read(10)
-                    file_is_pdf = first_bytes.startswith(b'%PDF')
-        
-        return {
-            "document_id": document_id,
-            "versions": len(versions),
-            "metadata": {
-                "filename": metadata.get('filename'),
-                "file_type": metadata.get('file_type'),
-                "file_path": file_path
-            },
-            "storage": {
-                "has_content_bytes": latest.content_bytes is not None,
-                "content_bytes_size": len(latest.content_bytes) if latest.content_bytes else 0,
-                "content_bytes_is_pdf": latest.content_bytes.startswith(b'%PDF') if latest.content_bytes else False,
-                "file_exists_on_disk": file_exists,
-                "file_size_on_disk": file_size,
-                "file_is_pdf": file_is_pdf
-            },
-            "content_preview": latest.content[:200] if latest.content else None
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/debug/test-pdf")
-async def test_pdf_response():
-    """Test endpoint that returns a minimal valid PDF"""
-    # Minimal valid PDF (1 page, blank)
-    minimal_pdf = b"""%PDF-1.4
-1 0 obj
-<<
-/Type /Catalog
-/Pages 2 0 R
->>
-endobj
-2 0 obj
-<<
-/Type /Pages
-/Kids [3 0 R]
-/Count 1
->>
-endobj
-3 0 obj
-<<
-/Type /Page
-/Parent 2 0 R
-/MediaBox [0 0 612 792]
->>
-endobj
-xref
-0 4
-0000000000 65535 f 
-0000000009 00000 n 
-0000000058 00000 n 
-0000000115 00000 n 
-trailer
-<<
-/Size 4
-/Root 1 0 R
->>
-startxref
-190
-%%EOF"""
-    
-    return StreamingResponse(
-        io.BytesIO(minimal_pdf),
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": "attachment; filename=test.pdf",
-            "Content-Type": "application/pdf"
-        }
-    )
-
-@router.get("/debug/name-matching")
-async def debug_name_matching():
-    """Debug endpoint to show name matching results"""
-    try:
-        # Get all documents
-        doc_ids = []
-        if vector_db_service.conn:
-            with vector_db_service.conn.cursor() as cur:
-                cur.execute(f"SELECT DISTINCT document_id FROM {VECTOR_TABLE}")
-                doc_ids = [row[0] for row in cur.fetchall()]
-        
-        # Index PDFs
-        pdf_resumes = {}
-        for doc_id in doc_ids:
-            versions = await versioning_service.get_versions(doc_id)
-            if versions:
-                latest = versions[-1]
-                metadata = latest.metadata or {}
-                if metadata.get("file_type") == "application/pdf":
-                    filename = metadata.get("filename", "")
-                    name_lower = filename.lower()
-                    name_lower = name_lower.replace('.pdf', '').replace('_profile', '').replace('-profile', '')
-                    name_parts = name_lower.replace('_', ' ').replace('-', ' ').split()
-                    if name_parts:
-                        name_part = name_parts[0].strip()
-                        pdf_resumes[name_part] = {
-                            "document_id": doc_id,
-                            "filename": filename
-                        }
-        
-        # Get CSV candidates
-        csv_candidates = []
-        for doc_id in doc_ids:
-            versions = await versioning_service.get_versions(doc_id)
-            if versions:
-                latest = versions[-1]
-                metadata = latest.metadata or {}
-                if metadata.get("file_type") == "text/csv":
-                    import csv
-                    import io
-                    content = latest.content
-                    reader = csv.DictReader(io.StringIO(content))
-                    for row in reader:
-                        cleaned_row = {k.strip().replace('\r', ''): v.strip() for k, v in row.items()}
-                        csv_candidates.append(cleaned_row.get('name', ''))
-        
-        # Test matching
-        matches = []
-        for candidate_name in csv_candidates:
-            candidate_first = candidate_name.lower().split()[0]
-            best_match = None
-            best_score = 0
-            
-            for pdf_name, pdf_info in pdf_resumes.items():
-                # Calculate score
-                score = 0
-                if candidate_first == pdf_name:
-                    score = 100
-                elif candidate_first in pdf_name or pdf_name in candidate_first:
-                    score = 80
-                elif (candidate_first[0] == pdf_name[0] and 
-                      abs(len(candidate_first) - len(pdf_name)) <= 2):
-                    common_chars = sum(1 for c in candidate_first if c in pdf_name)
-                    score = (common_chars / max(len(candidate_first), len(pdf_name))) * 70
-                
-                if score > best_score:
-                    best_score = score
-                    best_match = pdf_info
-            
-            matches.append({
-                "csv_candidate": candidate_name,
-                "csv_first_name": candidate_first,
-                "matched_pdf": best_match["filename"] if best_match else None,
-                "match_score": best_score,
-                "will_match": best_score >= 60,
-                "document_id": best_match["document_id"] if best_match else None
-            })
-        
-        return {
-            "pdf_resumes": {name: info["filename"] for name, info in pdf_resumes.items()},
-            "csv_candidates": csv_candidates,
-            "matches": matches
-        }
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/download/resume/{document_id}")
-async def download_resume(document_id: str):
-    """
-    Download individual resume PDF by document_id
-    """
-    try:
-        from urllib.parse import quote
-        from fastapi.responses import RedirectResponse
-        
-        versions = await versioning_service.get_versions(document_id)
-        if not versions:
-            raise HTTPException(status_code=404, detail="Document not found")
-
-        latest = versions[-1]
-        metadata = latest.metadata or {}
-        filename = metadata.get('filename', f'resume_{document_id}.pdf')
-        
-        # Sanitize filename
-        safe_filename = filename.replace('"', '').replace("'", "")
-        encoded_filename = quote(safe_filename)
-
-        logger.info(f"Download request for {document_id}, filename: {filename}")
-
-        # PRIORITY 1: Use Cloudinary URL (most reliable)
-        cloudinary_url = metadata.get('cloudinary_url')
-        if cloudinary_url:
-            logger.info(f"Redirecting to Cloudinary: {cloudinary_url}")
-            return RedirectResponse(url=cloudinary_url)
-
-        # PRIORITY 2: Check if file_path exists on disk
-        file_path = metadata.get('file_path')
-        if file_path:
-            from pathlib import Path
-            file_path_obj = Path(file_path)
-            logger.info(f"Checking file path: {file_path_obj}, exists: {file_path_obj.exists()}")
-            if file_path_obj.exists():
-                with open(file_path_obj, 'rb') as f:
-                    pdf_content = f.read()
-                logger.info(f"Read {len(pdf_content)} bytes from disk")
-                
-                if not pdf_content.startswith(b'%PDF'):
-                    logger.error(f"File on disk is not a valid PDF!")
-                    raise HTTPException(status_code=500, detail="Stored file is corrupted")
-                
-                return StreamingResponse(
-                    io.BytesIO(pdf_content),
-                    media_type="application/pdf",
-                    headers={
-                        "Content-Disposition": f'attachment; filename="{safe_filename}"; filename*=UTF-8\'\'{encoded_filename}',
-                        "Content-Type": "application/pdf",
-                        "Content-Length": str(len(pdf_content))
-                    }
-                )
-
-        # PRIORITY 3: Use content_bytes if available
-        if latest.content_bytes:
-            logger.info(f"Using content_bytes: {len(latest.content_bytes)} bytes")
-            
-            if not latest.content_bytes.startswith(b'%PDF'):
-                logger.error(f"content_bytes is not a valid PDF!")
-                raise HTTPException(status_code=500, detail="Stored PDF is corrupted")
-            
-            return StreamingResponse(
-                io.BytesIO(latest.content_bytes),
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f'attachment; filename="{safe_filename}"; filename*=UTF-8\'\'{encoded_filename}',
-                    "Content-Type": "application/pdf",
-                    "Content-Length": str(len(latest.content_bytes))
-                }
-            )
-
-        # Fallback: Return as text file
-        logger.warning(f"No PDF found, returning extracted text for {document_id}")
-        text_filename = safe_filename.replace('.pdf', '.txt')
-        encoded_text_filename = quote(text_filename)
-        text_bytes = latest.content.encode('utf-8')
-        return StreamingResponse(
-            io.BytesIO(text_bytes),
-            media_type="text/plain",
-            headers={
-                "Content-Disposition": f'attachment; filename="{text_filename}"; filename*=UTF-8\'\'{encoded_text_filename}',
-                "Content-Type": "text/plain",
-                "Content-Length": str(len(text_bytes))
-            }
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Download failed for {document_id}: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
-
-
 @router.post("/search/job")
 async def search_job(
     job_description: str = Form(...),
     max_results: Optional[int] = Form(10),
-    strict_location: Optional[bool] = Form(True)  # New parameter for strict location filtering
+    strict_location: Optional[bool] = Form(True)
 ):
     """
-    Search for candidates matching job description
-    Combines CSV filtering with resume RAG search
+    Search for candidates: CSV first, then RAG search for resumes
+    Returns candidates with resume download options
     """
     try:
         # Parse job description
@@ -843,217 +376,256 @@ async def search_job(
         
         logger.info(f"Job search: {job_req}, strict_location: {strict_location}")
         
-        # Get all documents from database
-        count = await vector_db_service.get_document_count()
-        if count == 0:
-            return {
-                "message": "No documents found. Please upload CSV and resumes first.",
-                "job_requirements": job_req,
-                "candidates": []
-            }
+        # STEP 1: Search CSV files first using hybrid search
+        csv_candidates = {}  # Use dict to avoid duplicates by name+role
+        csv_search_query = " ".join([
+            job_req.get("role") or "",
+            *(job_req.get("skills") or [])
+        ]).strip()
         
-        # Get all document IDs
-        doc_ids = []
-        if vector_db_service.conn:
-            with vector_db_service.conn.cursor() as cur:
-                cur.execute(f"SELECT DISTINCT document_id FROM {VECTOR_TABLE}")
-                doc_ids = [row[0] for row in cur.fetchall()]
+        logger.info(f"CSV search query: '{csv_search_query}'")
         
-        # First, collect all PDF resumes for name matching
-        pdf_resumes = {}  # name -> document_id mapping
-        for doc_id in doc_ids:
-            try:
-                versions = await versioning_service.get_versions(doc_id)
-                if versions:
-                    latest = versions[-1]
-                    metadata = latest.metadata or {}
-                    if metadata.get("file_type") == "application/pdf":
-                        filename = metadata.get("filename", "")
-                        # Extract name from filename - try multiple patterns
-                        # e.g., "Prashanth_Profile_React.pdf", "sakthi-2025-25.pdf"
-                        name_lower = filename.lower()
-                        # Remove common suffixes and split
-                        name_lower = name_lower.replace('.pdf', '').replace('_profile', '').replace('-profile', '')
-                        # Get first part (usually the name)
-                        name_parts = name_lower.replace('_', ' ').replace('-', ' ').split()
-                        if name_parts:
-                            name_part = name_parts[0].strip()
-                            pdf_resumes[name_part] = doc_id
-                            logger.info(f"Indexed PDF: '{filename}' as '{name_part}' -> {doc_id}")
-            except Exception as e:
-                logger.error(f"Error indexing PDF {doc_id}: {e}")
+        # Try hybrid search first, then fallback to direct CSV search
+        csv_results = []
+        if csv_search_query:
+            csv_results = await vector_db_service.hybrid_search(
+                query=csv_search_query,
+                limit=50  # Get more CSV results
+            )
+            logger.info(f"CSV hybrid search returned {len(csv_results)} results")
         
-        logger.info(f"Found {len(pdf_resumes)} PDF resumes: {list(pdf_resumes.keys())}")
+        # Fallback: Search all CSV documents directly if hybrid search returns few results
+        if len(csv_results) < 5:
+            logger.info("Fallback: Searching all CSV documents directly")
+            # Get all document IDs
+            doc_ids = []
+            if vector_db_service.conn:
+                with vector_db_service.conn.cursor() as cur:
+                    cur.execute(f"SELECT DISTINCT document_id FROM {VECTOR_TABLE}")
+                    doc_ids = [row[0] for row in cur.fetchall()]
+            
+            # Check each document to see if it's a CSV
+            for doc_id in doc_ids:
+                try:
+                    versions = await versioning_service.get_versions(doc_id)
+                    if versions:
+                        latest = versions[-1]
+                        metadata = latest.metadata or {}
+                        if metadata.get("file_type") == "text/csv":
+                            # Add to results as a fake search result
+                            csv_results.append({
+                                "document_id": doc_id,
+                                "content": latest.content[:500],  # First 500 chars
+                                "similarity": 1.0  # Max similarity for direct match
+                            })
+                except Exception as e:
+                    logger.error(f"Error checking document {doc_id}: {e}")
+            
+            logger.info(f"After fallback: {len(csv_results)} total CSV results")
         
-        # Match candidates
-        candidates = []
-        seen_candidates = set()  # Track unique candidates to avoid duplicates
-        
-        for doc_id in doc_ids:
-            try:
-                versions = await versioning_service.get_versions(doc_id)
-                if versions:
+        # Process CSV results
+        for result in csv_results:
+                doc_id = result.get("document_id")
+                logger.info(f"Processing CSV result: doc_id={doc_id}")
+                try:
+                    versions = await versioning_service.get_versions(doc_id)
+                    if not versions:
+                        continue
+                        
                     latest = versions[-1]
                     metadata = latest.metadata or {}
                     
-                    # Check if this is a CSV file with structured data
                     if metadata.get("file_type") == "text/csv":
-                        # Parse CSV content using csv module for proper handling
+                        logger.info(f"Found CSV file: {metadata.get('filename')}")
                         import csv
                         import io
-                        content = latest.content
-                        reader = csv.DictReader(io.StringIO(content))
+                        reader = csv.DictReader(io.StringIO(latest.content))
                         for row in reader:
-                            # Clean up any carriage returns in keys/values
                             cleaned_row = {k.strip().replace('\r', ''): v.strip() for k, v in row.items()}
+                            logger.info(f"CSV row: {cleaned_row}")
                             
-                            # STRICT LOCATION FILTER - Apply before matching
+                            # Apply strict location filter
                             if strict_location and job_req.get("location"):
                                 candidate_location = cleaned_row.get('location', '').lower().strip()
                                 job_location = job_req["location"].lower().strip()
-                                
-                                # Exact match required for strict filtering
+                                logger.info(f"Location check: candidate='{candidate_location}' vs job='{job_location}', strict={strict_location}")
                                 if candidate_location != job_location:
-                                    logger.debug(f"Skipping {cleaned_row.get('name')} - location mismatch: {candidate_location} != {job_location}")
+                                    logger.info(f"Skipping candidate due to location mismatch")
                                     continue
                             
-                            # Create unique key for this candidate
-                            candidate_key = (
-                                cleaned_row.get('name', '').lower(),
-                                cleaned_row.get('role', '').lower(),
-                                cleaned_row.get('location', '').lower()
-                            )
-                            
-                            # Skip if we've already seen this candidate
-                            if candidate_key in seen_candidates:
-                                continue
-                            
+                            # Match candidate against job requirements
                             match = job_parser_service.match_candidate(cleaned_row, job_req)
+                            logger.info(f"Match result for {cleaned_row.get('name')}: {match}")
                             if match["is_match"]:
-                                seen_candidates.add(candidate_key)
+                                # Create unique key to avoid duplicates
+                                candidate_key = f"{cleaned_row.get('name', '').lower()}_{cleaned_row.get('role', '').lower()}"
                                 
-                                candidate_name_full = cleaned_row.get('name', '')
-                                candidate_name = candidate_name_full.lower().split()[0]  # Get first name
-                                
-                                # Try to find matching PDF resume with fuzzy matching
-                                resume_doc_id = None
-                                best_match_score = 0
-                                
-                                for pdf_name, pdf_id in pdf_resumes.items():
-                                    # Calculate similarity score
-                                    score = 0
-                                    
-                                    # Exact match
-                                    if candidate_name == pdf_name:
-                                        score = 100
-                                    # One contains the other
-                                    elif candidate_name in pdf_name or pdf_name in candidate_name:
-                                        score = 80
-                                    # Similar length and starts with same letter
-                                    elif (candidate_name[0] == pdf_name[0] and 
-                                          abs(len(candidate_name) - len(pdf_name)) <= 2):
-                                        # Check character overlap
-                                        common_chars = sum(1 for c in candidate_name if c in pdf_name)
-                                        score = (common_chars / max(len(candidate_name), len(pdf_name))) * 70
-                                    
-                                    if score > best_match_score:
-                                        best_match_score = score
-                                        resume_doc_id = pdf_id
-                                
-                                if resume_doc_id and best_match_score >= 60:
-                                    logger.info(f"Matched CSV candidate '{candidate_name_full}' to PDF resume (score: {best_match_score})")
-                                    candidates.append({
-                                        **cleaned_row,
-                                        "match_score": match["score"],
-                                        "match_details": match,
-                                        "document_id": resume_doc_id,
-                                        "csv_document_id": doc_id,
-                                        "has_resume": True,
-                                        "resume_match_score": best_match_score,
-                                        "is_pdf": False,
-                                        "resume_document_id": resume_doc_id
-                                    })
-                                else:
-                                    logger.debug(f"No PDF resume found for '{candidate_name_full}' (best score: {best_match_score})")
-                    else:
-                        # This is a resume PDF - check if it matches job requirements
-                        try:
-                            resume_text = latest.content
-                            if not resume_text:
-                                logger.debug(f"No content in PDF: {metadata.get('filename')}")
-                                continue
-                            
-                            resume_text_lower = resume_text.lower()
-                            filename = metadata.get("filename", "").lower()
-                            
-                            # Extract job role and skills - handle None values
-                            job_role = (job_req.get("role") or "").lower()
-                            job_skills = [s.lower() for s in (job_req.get("skills") or [])]
-                            raw_text = (job_req.get("raw_text") or "").lower()
-                            
-                            # Calculate match score based on keyword presence
-                            score = 0
-                            matches = []
-                            
-                            # Check for role keywords in resume
-                            if job_role:
-                                role_keywords = [k for k in job_role.split() if len(k) > 2]
-                                for keyword in role_keywords:
-                                    if keyword in resume_text_lower:
-                                        score += 15
-                                        matches.append(f"Role keyword: {keyword}")
-                            
-                            # Check for skills in resume
-                            for skill in job_skills:
-                                if skill and skill in resume_text_lower:
-                                    score += 20
-                                    matches.append(f"Skill: {skill}")
-                            
-                            # If no role parsed, check raw text for keywords
-                            if not job_role and raw_text:
-                                raw_keywords = [k for k in raw_text.split() if len(k) > 2]
-                                for keyword in raw_keywords:
-                                    if keyword in resume_text_lower:
-                                        score += 10
-                                        matches.append(f"Keyword: {keyword}")
-                            
-                            # Check filename for keyword match (fallback)
-                            if score == 0 and raw_text:
-                                raw_keywords = [k for k in raw_text.split() if len(k) > 2]
-                                for keyword in raw_keywords:
-                                    if keyword in filename:
-                                        score += 5
-                                        matches.append(f"Keyword in filename: {keyword}")
-                            
-                            # If we found any matches, add the candidate
-                            if score > 0:
-                                candidate_obj = {
-                                    "document_id": doc_id,
-                                    "filename": metadata.get("filename", ""),
-                                    "name": metadata.get("filename", "").replace('.pdf', '').replace('_Profile', '').replace('_profile', '').replace('_', ' '),
-                                    "file_path": metadata.get("file_path"),
-                                    "match_score": min(score, 100),
-                                    "match_details": {"matches": matches, "score": score},
-                                    "has_resume": True,
-                                    "is_pdf": True,
-                                    "resume_document_id": doc_id
+                                csv_candidates[candidate_key] = {
+                                    **cleaned_row,
+                                    "match_score": match["score"],
+                                    "match_details": match,
+                                    "csv_document_id": doc_id,
+                                    "source": "csv"
                                 }
-                                candidates.append(candidate_obj)
-                                logger.info(f"Matched PDF resume: {metadata.get('filename')} (doc_id: {doc_id}, score: {score}, matches: {matches})")
-                            else:
-                                logger.debug(f"No match for PDF: {metadata.get('filename')} (raw_text: {raw_text})")
-                        except Exception as e:
-                            logger.error(f"Error processing PDF {doc_id}: {e}", exc_info=True)
-            except Exception as e:
-                logger.error(f"Error processing document {doc_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Error processing CSV {doc_id}: {e}")
         
-        # Sort by match score
-        candidates.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+        # Convert to list
+        csv_candidates_list = list(csv_candidates.values())
+        
+        logger.info(f"Found {len(csv_candidates_list)} CSV candidates")
+        
+        # STEP 2: RAG search for resumes using general search
+        rag_candidates = []
+        role = job_req.get('role') or ''
+        skills = job_req.get('skills') or []
+        rag_search_query = f"Find candidates with {role} skills: {', '.join(skills)}"
+        
+        # Get RAG search results
+        rag_results = await vector_db_service.hybrid_search(
+            query=rag_search_query,
+            limit=50
+        )
+        
+        # Process RAG results for PDF resumes
+        pdf_candidates = {}  # document_id -> best candidate data
+        
+        for result in rag_results:
+            doc_id = result.get("document_id")
+            try:
+                versions = await versioning_service.get_versions(doc_id)
+                if not versions:
+                    continue
+                    
+                latest = versions[-1]
+                metadata = latest.metadata or {}
+                
+                if metadata.get("file_type") == "application/pdf":
+                    filename = metadata.get("filename", "")
+                    resume_text = latest.content.lower()
+                    
+                    # Calculate match score for PDF
+                    score = 0
+                    matches = []
+                    
+                    # Check role keywords
+                    if job_req.get("role"):
+                        role_keywords = [k for k in job_req["role"].lower().split() if len(k) > 2]
+                        for keyword in role_keywords:
+                            if keyword in resume_text:
+                                score += 15
+                                matches.append(f"Role: {keyword}")
+                    
+                    # Check skills
+                    for skill in job_req.get("skills", []):
+                        if skill and skill.lower() in resume_text:
+                            score += 20
+                            matches.append(f"Skill: {skill}")
+                    
+                    # Add vector similarity score
+                    similarity = result.get("similarity", result.get("final_score", 0))
+                    score += similarity * 30
+                    
+                    # Only include if score is above threshold
+                    if score > 20:
+                        name_from_filename = filename.replace('.pdf', '').replace('_Profile', '').replace('_profile', '').replace('_', ' ').replace('-', ' ').title()
+                        
+                        # Keep only the best scoring chunk for each document
+                        if doc_id not in pdf_candidates or score > pdf_candidates[doc_id]["match_score"]:
+                            pdf_candidates[doc_id] = {
+                                "document_id": doc_id,
+                                "filename": filename,
+                                "name": name_from_filename,
+                                "file_path": metadata.get("file_path"),
+                                "cloudinary_url": metadata.get("cloudinary_url"),
+                                "match_score": min(score, 100),
+                                "match_details": {
+                                    "matches": list(set(matches)),  # Remove duplicates
+                                    "score": score,
+                                    "similarity": similarity
+                                },
+                                "source": "rag_resume",
+                                "resume_content_preview": result.get("content", "")[:300] + "..."
+                            }
+            except Exception as e:
+                logger.error(f"Error processing PDF {doc_id}: {e}")
+        
+        # Convert to list
+        rag_candidates = list(pdf_candidates.values())
+        
+        logger.info(f"Found {len(rag_candidates)} RAG resume candidates")
+        
+        # STEP 3: Merge and link CSV candidates with their resumes
+        final_candidates = []
+        
+        # First add CSV candidates and try to link their resumes
+        for csv_candidate in csv_candidates_list:
+            candidate_name = csv_candidate.get('name', '').lower().split()[0]
+            
+            # Find matching resume
+            matching_resume = None
+            best_match_score = 0
+            
+            for rag_candidate in rag_candidates:
+                rag_name = rag_candidate.get('name', '').lower().split()[0] if rag_candidate.get('name') else ""
+                
+                # Calculate name similarity
+                name_score = 0
+                if candidate_name == rag_name:
+                    name_score = 100
+                elif candidate_name in rag_name or rag_name in candidate_name:
+                    name_score = 80
+                elif candidate_name and rag_name and candidate_name[0] == rag_name[0]:
+                    name_score = 60
+                
+                if name_score > best_match_score:
+                    best_match_score = name_score
+                    matching_resume = rag_candidate
+            
+            # Add CSV candidate with resume info
+            final_candidate = {
+                **csv_candidate,
+                "has_resume": matching_resume is not None,
+                "resume_document_id": matching_resume.get("document_id") if matching_resume else None,
+                "resume_filename": matching_resume.get("filename") if matching_resume else None,
+                "resume_file_path": matching_resume.get("file_path") if matching_resume else None,
+                "resume_cloudinary_url": matching_resume.get("cloudinary_url") if matching_resume else None,
+                "resume_match_score": best_match_score if matching_resume else 0,
+                "combined_score": csv_candidate["match_score"] + (best_match_score * 0.3) if matching_resume else csv_candidate["match_score"]
+            }
+            final_candidates.append(final_candidate)
+        
+        # Add standalone RAG candidates (resumes without CSV entries)
+        used_resume_ids = {c.get("resume_document_id") for c in final_candidates if c.get("resume_document_id")}
+        
+        for rag_candidate in rag_candidates:
+            if rag_candidate["document_id"] not in used_resume_ids:
+                final_candidates.append({
+                    **rag_candidate,
+                    "has_resume": True,
+                    "resume_document_id": rag_candidate["document_id"],
+                    "resume_filename": rag_candidate["filename"],
+                    "resume_file_path": rag_candidate["file_path"],
+                    "resume_cloudinary_url": rag_candidate.get("cloudinary_url"),
+                    "combined_score": rag_candidate["match_score"]
+                })
+        
+        # Sort by combined score
+        final_candidates.sort(key=lambda x: x.get("combined_score", 0), reverse=True)
         
         # Limit results
-        candidates = candidates[:max_results]
+        final_candidates = final_candidates[:max_results]
         
-        # Generate summary using LLM
+        if not final_candidates:
+            return {
+                "message": "No matching candidates found.",
+                "job_requirements": job_req,
+                "candidates": [],
+                "csv_found": len(csv_candidates_list),
+                "resumes_found": len(rag_candidates)
+            }
+        
+        # STEP 4: Generate LLM summary
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             temperature=0.2,
@@ -1062,45 +634,197 @@ async def search_job(
         
         # Build context from candidates
         context_parts = []
-        for i, candidate in enumerate(candidates, 1):
-            if "role" in candidate:
-                context_parts.append(f"{i}. {candidate.get('name', 'Unknown')}")
+        for i, candidate in enumerate(final_candidates, 1):
+            if candidate.get("source") == "csv":
+                context_parts.append(f"{i}. {candidate.get('name', 'Unknown')} (CSV + Resume)")
                 context_parts.append(f"   Role: {candidate.get('role', 'N/A')}")
                 context_parts.append(f"   Skills: {candidate.get('skills', 'N/A')}")
                 context_parts.append(f"   Location: {candidate.get('location', 'N/A')}")
                 context_parts.append(f"   Cost: {candidate.get('cost', 'N/A')}")
-                context_parts.append(f"   Resume: {'Available' if candidate.get('has_resume') else 'Not found'}")
+                context_parts.append(f"   Resume Available: {'Yes' if candidate.get('has_resume') else 'No'}")
             else:
-                context_parts.append(f"{i}. {candidate.get('filename', 'Unknown')}")
-                context_parts.append(f"   Match Score: {candidate.get('match_score', 0)}")
+                context_parts.append(f"{i}. {candidate.get('name', 'Unknown')} (Resume Only)")
+                context_parts.append(f"   Filename: {candidate.get('filename', 'N/A')}")
+                context_parts.append(f"   Skills Found: {', '.join([m.split(': ')[1] for m in candidate.get('match_details', {}).get('matches', []) if 'Skill:' in m])}")
+            
+            context_parts.append(f"   Match Score: {candidate.get('combined_score', 0):.1f}")
+            context_parts.append("")
         
         context = "\n".join(context_parts)
         
         # Generate answer
         prompt = f"""
-        Based on the following job requirements and matching candidates, provide a summary.
-        
-        Job Requirements:
-        - Role: {job_req.get('role', 'N/A')}
-        - Skills: {', '.join(job_req.get('skills', []))}
-        - Location: {job_req.get('location', 'N/A')}
-        - Cost: {job_req.get('cost', 'N/A')}
-        
-        Matching Candidates:
-        {context}
-        
-        Provide a concise summary of the matching candidates.
-        """
+Based on the job requirements and matching candidates found, provide a comprehensive summary.
+
+Job Requirements:
+- Role: {job_req.get('role', 'N/A')}
+- Skills: {', '.join(job_req.get('skills', []))}
+- Location: {job_req.get('location', 'N/A')}
+- Cost Budget: {job_req.get('cost', 'N/A')}
+
+Search Results:
+- CSV Candidates Found: {len(csv_candidates)}
+- Resume Candidates Found: {len(rag_candidates)}
+- Total Final Candidates: {len(final_candidates)}
+
+Matching Candidates:
+{context}
+
+Provide a summary of:
+1. How well the candidates match the requirements
+2. Availability of resumes for download
+3. Recommendations for next steps
+"""
         
         answer = await llm.ainvoke(prompt)
         
+        logger.info(f"Job search completed: {len(final_candidates)} final candidates")
+        
         return {
-            "message": f"Found {len(candidates)} matching candidates",
+            "message": f"Found {len(final_candidates)} matching candidates",
             "job_requirements": job_req,
-            "candidates": candidates,
+            "search_summary": {
+                "csv_candidates_found": len(csv_candidates_list),
+                "resume_candidates_found": len(rag_candidates),
+                "final_candidates": len(final_candidates)
+            },
+            "candidates": final_candidates,
             "answer": answer.content if hasattr(answer, 'content') else str(answer)
         }
         
     except Exception as e:
-        logger.error(f"Job search error: {e}")
+        logger.error(f"Job search error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Job search failed: {str(e)}")
+
+    except Exception as e:
+        logger.error(f"Job search error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Job search failed: {str(e)}")
+
+@router.get("/download/resume/{document_id}")
+async def download_resume(document_id: str):
+    """
+    Download resume PDF by document ID
+    """
+    try:
+        # Get document versions
+        versions = await versioning_service.get_versions(document_id)
+        if not versions:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        
+        latest = versions[-1]
+        metadata = latest.metadata or {}
+        
+        # Check if it's a PDF
+        if metadata.get("file_type") != "application/pdf":
+            raise HTTPException(status_code=400, detail="Document is not a PDF resume")
+        
+        filename = metadata.get("filename", f"resume_{document_id}.pdf")
+        
+        # Try to get from file path first
+        file_path = metadata.get("file_path")
+        if file_path:
+            from pathlib import Path
+            if Path(file_path).exists():
+                with open(file_path, "rb") as f:
+                    content = f.read()
+                
+                return StreamingResponse(
+                    io.BytesIO(content),
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"}
+                )
+        
+        # Try to get from Cloudinary
+        cloudinary_url = metadata.get("cloudinary_url")
+        if cloudinary_url:
+            import requests
+            response = requests.get(cloudinary_url)
+            if response.status_code == 200:
+                return StreamingResponse(
+                    io.BytesIO(response.content),
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"}
+                )
+        
+        # Fallback: try to get from content_bytes in versioning
+        if latest.content_bytes:
+            return StreamingResponse(
+                io.BytesIO(latest.content_bytes),
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
+            )
+        
+        raise HTTPException(status_code=404, detail="Resume file not found")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Resume download error: {e}")
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+@router.get("/documents")
+async def list_documents():
+    """
+    List all uploaded documents
+    """
+    try:
+        # Get all document IDs from vector database
+        doc_ids = []
+        if vector_db_service.conn:
+            with vector_db_service.conn.cursor() as cur:
+                cur.execute(f"SELECT DISTINCT document_id FROM {VECTOR_TABLE}")
+                doc_ids = [row[0] for row in cur.fetchall()]
+        
+        documents = []
+        for doc_id in doc_ids:
+            try:
+                versions = await versioning_service.get_versions(doc_id)
+                if versions:
+                    latest = versions[-1]
+                    metadata = latest.metadata or {}
+                    
+                    # Count chunks for this document
+                    chunk_count = 0
+                    if vector_db_service.conn:
+                        with vector_db_service.conn.cursor() as cur:
+                            cur.execute(f"SELECT COUNT(*) FROM {VECTOR_TABLE} WHERE document_id = %s", (doc_id,))
+                            chunk_count = cur.fetchone()[0]
+                    
+                    documents.append({
+                        "id": doc_id,
+                        "name": metadata.get("filename", f"Document {doc_id}"),
+                        "chunks_created": chunk_count,
+                        "file_type": metadata.get("file_type", "unknown"),
+                        "upload_date": latest.created_at.isoformat() if hasattr(latest, 'created_at') else None
+                    })
+            except Exception as e:
+                logger.error(f"Error processing document {doc_id}: {e}")
+        
+        return {"documents": documents}
+        
+    except Exception as e:
+        logger.error(f"List documents error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+@router.delete("/documents/{document_id}")
+async def delete_document(document_id: str):
+    """
+    Delete a document and all its chunks
+    """
+    try:
+        # Delete from vector database
+        if vector_db_service.conn:
+            with vector_db_service.conn.cursor() as cur:
+                cur.execute(f"DELETE FROM {VECTOR_TABLE} WHERE document_id = %s", (document_id,))
+                vector_db_service.conn.commit()
+        
+        # Delete versions
+        await versioning_service.delete_document(document_id)
+        
+        # Remove from teams if applicable
+        await team_service.remove_document_from_all_teams(document_id)
+        
+        return {"message": "Document deleted successfully", "document_id": document_id}
+        
+    except Exception as e:
+        logger.error(f"Delete document error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")

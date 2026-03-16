@@ -25,7 +25,17 @@ class JobParserService:
             "mysql": ["mysql"],
             "postgresql": ["postgresql", "postgres", "pg"],
             "mongodb": ["mongodb", "mongo"],
-            "fastapi": ["fastapi"]
+            "fastapi": ["fastapi"],
+            "ibm": ["ibm", "ibm integration bus", "iib", "websphere"],
+            "java": ["java", "j2ee", "spring", "hibernate"],
+            "javascript": ["javascript", "js", "node", "nodejs"],
+            "angular": ["angular", "angularjs"],
+            "vue": ["vue", "vuejs"],
+            "sql": ["sql", "mysql", "postgresql", "oracle"],
+            "aws": ["aws", "amazon web services", "ec2", "s3"],
+            "azure": ["azure", "microsoft azure"],
+            "docker": ["docker", "containerization"],
+            "kubernetes": ["kubernetes", "k8s"]
         }
     
     def parse_job_description(self, job_description: str) -> Dict[str, any]:
@@ -47,25 +57,49 @@ class JobParserService:
             "raw_text": job_description
         }
         
-        # Extract role/title - more flexible pattern
+        # Extract role/title - more flexible pattern with typo tolerance
         role_patterns = [
-            r"(?i)(python|react|java|node|backend|frontend|fullstack)\s*developer",
-            r"(?i)(software\s*engineer|devops\s*engineer)",
-            r"(?i)(role[:\s]+)([A-Za-z\s]+?)(?=\n|$)"
+            r"(?i)(python|react|java|node|backend|frontend|fullstack|ibm|angular|vue)\s*develop[er]*",  # Handle typos like "develpoer"
+            r"(?i)(software\s*engineer|devops\s*engineer|data\s*engineer)",
+            r"(?i)(role[:\s]+)([A-Za-z\s]+?)(?=\n|$)",
+            r"(?i)\b(python|react|java|node|backend|frontend|fullstack|ibm|angular|vue)\s+developer\b",  # More specific pattern
+            r"(?i)\b(python|react|java|node|backend|frontend|fullstack|ibm|angular|vue)\b"  # Fallback: just the technology name
         ]
         for pattern in role_patterns:
             match = re.search(pattern, job_description)
             if match:
-                result["role"] = match.group(0).strip()
+                matched_text = match.group(0).strip()
+                # Clean up the match
+                if "develop" in matched_text.lower():
+                    # Extract the technology part and add "developer"
+                    tech_match = re.search(r"(?i)(python|react|java|node|backend|frontend|fullstack|ibm|angular|vue)", matched_text)
+                    if tech_match:
+                        result["role"] = f"{tech_match.group(1).lower()} developer"
+                else:
+                    result["role"] = matched_text.lower()
                 break
+        
+        # If no role found but skills are detected, create role from skills
+        if not result["role"]:
+            skills = self._extract_skills(job_description)
+            if skills:
+                result["role"] = f"{skills[0]} developer"
         
         # Extract skills
         result["skills"] = self._extract_skills(job_description)
         
-        # Extract location - look for city names after "in" or "at"
-        location_match = re.search(r"(?i)(in|at)\s+([A-Za-z]+)", job_description)
-        if location_match:
-            result["location"] = location_match.group(2).strip()
+        # Extract location - look for city names after "in" or "at", or standalone city names
+        location_patterns = [
+            r"(?i)\bin\s+([A-Za-z]+)",  # "in Bangalore"
+            r"(?i)\bat\s+([A-Za-z]+)",  # "at Bangalore"  
+            r"(?i)\b(bangalore|chennai|mumbai|delhi|hyderabad|pune|coimbatore|kolkata)\b"  # Common Indian cities
+        ]
+        
+        for pattern in location_patterns:
+            location_match = re.search(pattern, job_description)
+            if location_match:
+                result["location"] = location_match.group(1).strip()
+                break
         
         # Extract cost/salary
         cost_match = re.search(r"(?i)(cost|salary)[:\s]+(\d+)", job_description)

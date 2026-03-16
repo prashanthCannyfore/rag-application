@@ -174,6 +174,17 @@ class TeamService:
         
         return False
     
+    async def remove_document_from_all_teams(self, document_id: str) -> int:
+        """Remove a document from all teams"""
+        removed_count = 0
+        for team_id in self.team_documents:
+            docs = self.team_documents[team_id]
+            for i in range(len(docs) - 1, -1, -1):  # Iterate backwards
+                if docs[i].document_id == document_id:
+                    del docs[i]
+                    removed_count += 1
+        return removed_count
+    
     async def search_team_documents(
         self,
         team_id: str,

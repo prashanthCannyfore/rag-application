@@ -226,7 +226,16 @@ class VersioningService:
         for i, v in enumerate(versions):
             if v.version == version:
                 del versions[i]
+                self._save_to_disk()
                 return True
+        return False
+    
+    async def delete_document(self, document_id: str) -> bool:
+        """Delete all versions of a document"""
+        if document_id in self.versions:
+            del self.versions[document_id]
+            self._save_to_disk()
+            return True
         return False
     
     def get_version_count(self, document_id: str) -> int:

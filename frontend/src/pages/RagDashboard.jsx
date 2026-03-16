@@ -82,7 +82,7 @@ export default function RagDashboard() {
         // Handle as job search
         const formData = new FormData();
         formData.append('job_description', question);
-        formData.append('max_results', 10);
+        formData.append('max_results', 2);
         formData.append('strict_location', false);
 
         const response = await fetch('http://localhost:8000/api/rag/search/job', {
@@ -140,6 +140,57 @@ export default function RagDashboard() {
 
   const downloadResume = (documentId) => {
     window.open(`http://localhost:8000/api/rag/download/resume/${documentId}`, '_blank');
+  };
+
+  const handleJobSearch = async (e) => {
+    e.preventDefault();
+    if (!jobDescription.trim() || jobSearchLoading) return;
+
+    setJobSearchLoading(true);
+    setCandidates([]);
+    setSources([]);
+
+    try {
+      const formData = new FormData();
+      formData.append('job_description', jobDescription);
+      formData.append('max_results', 10);
+      formData.append('strict_location', false);
+
+      const response = await fetch('http://localhost:8000/api/rag/search/job', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) throw new Error('Job search failed');
+      
+      const data = await response.json();
+      
+      // Set candidates from new response structure
+      setCandidates(data.candidates || []);
+      
+      // Build sources for the right panel (resumes only)
+      const resumeSources = (data.candidates || [])
+        .filter(c => c.has_resume)
+        .map((c, idx) => ({
+          content: `📄 ${c.name || c.filename}`,
+          document_id: c.resume_document_id || c.document_id,
+          similarity: (c.combined_score || c.match_score || 0) / 100,
+          chunk_index: idx,
+          file_type: 'application/pdf',
+          candidate_name: c.name || c.filename,
+          candidate_role: c.role || 'Resume',
+          source_type: c.source || 'unknown'
+        }));
+      
+      setSources(resumeSources);
+      
+    } catch (error) {
+      console.error('Job search failed:', error);
+      setCandidates([]);
+      setSources([]);
+    } finally {
+      setJobSearchLoading(false);
+    }
   };
 
   return (
