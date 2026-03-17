@@ -1,7 +1,21 @@
 import psycopg2
+import os
+from dotenv import load_dotenv
 
-conn = psycopg2.connect('postgresql://postgres:Thangamani%40123@localhost:5433/rag')
+# Load environment variables
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    DATABASE_URL = 'postgresql://postgres:Thangamani%40123@localhost:5432/rag'
+
+conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
+
+# Enable pgvector extension
+cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+conn.commit()
+print("pgvector extension enabled")
 
 # Drop existing table if exists
 cur.execute("DROP TABLE IF EXISTS document_embeddings;")

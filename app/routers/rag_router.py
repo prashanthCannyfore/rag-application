@@ -28,6 +28,8 @@ from app.services.versioning_service import versioning_service
 from app.services.background_service import background_job_service, JobType
 from app.services.team_service import team_service
 from app.services.pdf_service import pdf_service
+from app.services.candidate_matching_service import candidate_matching_service
+from app.services.resume_parser_service import resume_parser_service, clean_text
 from app.services.file_storage_service import file_storage_service
 from app.services.job_parser_service import job_parser_service
 from app.services.vector_db_service import VECTOR_TABLE
@@ -367,128 +369,88 @@ async def search_job(
     strict_location: Optional[bool] = Form(True)
 ):
     """
-    Search for candidates: CSV first, then RAG search for resumes
-    Returns candidates with resume download options
+    Enhanced job search with improved candidate matching and CSV-resume linking
     """
     try:
         # Parse job description
         job_req = job_parser_service.parse_job_description(job_description)
-        
         logger.info(f"Job search: {job_req}, strict_location: {strict_location}")
         
-        # STEP 1: Search CSV files first using hybrid search
-        csv_candidates = {}  # Use dict to avoid duplicates by name+role
-        csv_search_query = " ".join([
-            job_req.get("role") or "",
-            *(job_req.get("skills") or [])
-        ]).strip()
+        # STEP 1: Get CSV candidates efficiently with enhanced search
+        skills_query = ",".join(job_req.get("skills", []))
+        role_query = job_req.get("role", "")
         
-        logger.info(f"CSV search query: '{csv_search_query}'")
-        
-        # Try hybrid search first, then fallback to direct CSV search
-        csv_results = []
-        if csv_search_query:
-            csv_results = await vector_db_service.hybrid_search(
-                query=csv_search_query,
-                limit=50  # Get more CSV results
-            )
-            logger.info(f"CSV hybrid search returned {len(csv_results)} results")
-        
-        # Fallback: Search all CSV documents directly if hybrid search returns few results
-        if len(csv_results) < 5:
-            logger.info("Fallback: Searching all CSV documents directly")
-            # Get all document IDs
-            doc_ids = []
-            if vector_db_service.conn:
-                with vector_db_service.conn.cursor() as cur:
-                    cur.execute(f"SELECT DISTINCT document_id FROM {VECTOR_TABLE}")
-                    doc_ids = [row[0] for row in cur.fetchall()]
+        # FALLBACK: If no structured data extracted, use raw text for keyword search
+        if not skills_query and not role_query:
+            # Use raw text as fallback search terms
+            raw_text = job_req.get("raw_text", "").lower()
+            # Extract potential keywords from raw text
+            fallback_keywords = []
+            common_tech_terms = [
+                'react', 'angular', 'vue', 'javascript', 'python', 'java', 'node', 'sql', 
+                'mongodb', 'postgresql', 'mysql', 'oracle', 'aws', 'azure', 'docker', 
+                'kubernetes', 'ibm', 'iib', 'ace', 'mq', 'websphere', 'esql', 'developer',
+                'engineer', 'programmer', 'fullstack', 'backend', 'frontend', 'integration'
+            ]
             
-            # Check each document to see if it's a CSV
-            for doc_id in doc_ids:
-                try:
-                    versions = await versioning_service.get_versions(doc_id)
-                    if versions:
-                        latest = versions[-1]
-                        metadata = latest.metadata or {}
-                        if metadata.get("file_type") == "text/csv":
-                            # Add to results as a fake search result
-                            csv_results.append({
-                                "document_id": doc_id,
-                                "content": latest.content[:500],  # First 500 chars
-                                "similarity": 1.0  # Max similarity for direct match
-                            })
-                except Exception as e:
-                    logger.error(f"Error checking document {doc_id}: {e}")
+            for term in common_tech_terms:
+                if term in raw_text:
+                    fallback_keywords.append(term)
             
-            logger.info(f"After fallback: {len(csv_results)} total CSV results")
+            if fallback_keywords:
+                skills_query = ",".join(fallback_keywords[:5])  # Limit to top 5 keywords
+                logger.info(f"Using fallback keywords: {skills_query}")
+            else:
+                # Last resort: use first few words of raw text
+                words = raw_text.split()[:3]  # Take first 3 words
+                skills_query = " ".join(words) if words else "developer"
+                logger.info(f"Using raw text fallback: {skills_query}")
         
-        # Process CSV results
-        for result in csv_results:
-                doc_id = result.get("document_id")
-                logger.info(f"Processing CSV result: doc_id={doc_id}")
-                try:
-                    versions = await versioning_service.get_versions(doc_id)
-                    if not versions:
-                        continue
-                        
-                    latest = versions[-1]
-                    metadata = latest.metadata or {}
-                    
-                    if metadata.get("file_type") == "text/csv":
-                        logger.info(f"Found CSV file: {metadata.get('filename')}")
-                        import csv
-                        import io
-                        reader = csv.DictReader(io.StringIO(latest.content))
-                        for row in reader:
-                            cleaned_row = {k.strip().replace('\r', ''): v.strip() for k, v in row.items()}
-                            logger.info(f"CSV row: {cleaned_row}")
-                            
-                            # Apply strict location filter
-                            if strict_location and job_req.get("location"):
-                                candidate_location = cleaned_row.get('location', '').lower().strip()
-                                job_location = job_req["location"].lower().strip()
-                                logger.info(f"Location check: candidate='{candidate_location}' vs job='{job_location}', strict={strict_location}")
-                                if candidate_location != job_location:
-                                    logger.info(f"Skipping candidate due to location mismatch")
-                                    continue
-                            
-                            # Match candidate against job requirements
-                            match = job_parser_service.match_candidate(cleaned_row, job_req)
-                            logger.info(f"Match result for {cleaned_row.get('name')}: {match}")
-                            if match["is_match"]:
-                                # Create unique key to avoid duplicates
-                                candidate_key = f"{cleaned_row.get('name', '').lower()}_{cleaned_row.get('role', '').lower()}"
-                                
-                                csv_candidates[candidate_key] = {
-                                    **cleaned_row,
-                                    "match_score": match["score"],
-                                    "match_details": match,
-                                    "csv_document_id": doc_id,
-                                    "source": "csv"
-                                }
-                except Exception as e:
-                    logger.error(f"Error processing CSV {doc_id}: {e}")
-        
-        # Convert to list
-        csv_candidates_list = list(csv_candidates.values())
-        
-        logger.info(f"Found {len(csv_candidates_list)} CSV candidates")
-        
-        # STEP 2: RAG search for resumes using general search
-        rag_candidates = []
-        role = job_req.get('role') or ''
-        skills = job_req.get('skills') or []
-        rag_search_query = f"Find candidates with {role} skills: {', '.join(skills)}"
-        
-        # Get RAG search results
-        rag_results = await vector_db_service.hybrid_search(
-            query=rag_search_query,
-            limit=50
+        csv_candidates = await vector_db_service.get_csv_candidates(
+            skills_query=skills_query, 
+            role_query=role_query
         )
         
-        # Process RAG results for PDF resumes
-        pdf_candidates = {}  # document_id -> best candidate data
+        # Filter and score CSV candidates
+        qualified_csv_candidates = []
+        for candidate in csv_candidates:
+            match_result = candidate_matching_service.match_candidate_to_job(
+                candidate, job_req, strict_location
+            )
+            
+            if match_result["is_match"]:
+                candidate.update({
+                    "match_score": match_result["total_score"] * 100,
+                    "match_details": match_result,
+                    "source": "csv"
+                })
+                qualified_csv_candidates.append(candidate)
+        
+        logger.info(f"Found {len(qualified_csv_candidates)} qualified CSV candidates")
+        
+        # STEP 2: Get resume candidates using hybrid search
+        role = job_req.get('role', '')
+        skills = job_req.get('skills', [])
+        rag_search_query = f"{role} {' '.join(skills)}".strip()
+        
+        # FALLBACK: If no meaningful search query, use raw text
+        if not rag_search_query or rag_search_query.isspace():
+            raw_text = job_req.get("raw_text", "")
+            if raw_text:
+                rag_search_query = raw_text
+                logger.info(f"Using raw text for resume search: {rag_search_query}")
+            else:
+                rag_search_query = "developer"  # Ultimate fallback
+                logger.info("Using ultimate fallback: developer")
+        
+        rag_results = await vector_db_service.hybrid_search(
+            query=rag_search_query,
+            limit=50,
+            file_type_filter="application/pdf"
+        )
+        
+        # Process resume results
+        resume_candidates = {}  # document_id -> best candidate data
         
         for result in rag_results:
             doc_id = result.get("document_id")
@@ -502,202 +464,268 @@ async def search_job(
                 
                 if metadata.get("file_type") == "application/pdf":
                     filename = metadata.get("filename", "")
-                    resume_text = latest.content.lower()
+                    resume_text = latest.content
                     
-                    # Calculate match score for PDF
-                    score = 0
-                    matches = []
+                    # Parse resume to extract structured information
+                    parsed_resume = resume_parser_service.parse_resume(resume_text, filename)
                     
-                    # Check role keywords
-                    if job_req.get("role"):
-                        role_keywords = [k for k in job_req["role"].lower().split() if len(k) > 2]
-                        for keyword in role_keywords:
-                            if keyword in resume_text:
-                                score += 15
-                                matches.append(f"Role: {keyword}")
+                    # Enhanced scoring using candidate matching service
+                    resume_candidate = {
+                        "name": parsed_resume["name"],
+                        "skills": parsed_resume["skills"],
+                        "role": "",  # Will be inferred from content
+                        "location": parsed_resume["location"] or "",
+                        "cost": parsed_resume["salary"] or "",
+                        "experience": parsed_resume["experience"]  # Include experience for validation
+                    }
                     
-                    # Check skills
-                    for skill in job_req.get("skills", []):
-                        if skill and skill.lower() in resume_text:
-                            score += 20
-                            matches.append(f"Skill: {skill}")
+                    match_result = candidate_matching_service.match_candidate_to_job(
+                        resume_candidate, job_req, False  # Not strict for resumes
+                    )
                     
-                    # Add vector similarity score
-                    similarity = result.get("similarity", result.get("final_score", 0))
-                    score += similarity * 30
+                    # Add vector similarity boost
+                    vector_score = result.get("final_score", result.get("similarity", 0))
+                    total_score = (match_result["total_score"] * 0.7) + (vector_score * 0.3)
                     
-                    # Only include if score is above threshold
-                    if score > 20:
-                        name_from_filename = filename.replace('.pdf', '').replace('_Profile', '').replace('_profile', '').replace('_', ' ').replace('-', ' ').title()
-                        
+                    if total_score > 0.3:  # Lower threshold for resume discovery
                         # Keep only the best scoring chunk for each document
-                        if doc_id not in pdf_candidates or score > pdf_candidates[doc_id]["match_score"]:
-                            pdf_candidates[doc_id] = {
+                        if doc_id not in resume_candidates or total_score > resume_candidates[doc_id]["match_score"]:
+                            resume_candidates[doc_id] = {
                                 "document_id": doc_id,
                                 "filename": filename,
-                                "name": name_from_filename,
+                                "name": resume_candidate["name"],
+                                "skills": parsed_resume["skills"],
+                                "location": parsed_resume["location"] or "Not specified",
+                                "cost": parsed_resume["salary"] or "Not specified",
+                                "experience": parsed_resume["experience"] or "Not specified",
+                                "email": parsed_resume.get("email"),
+                                "phone": parsed_resume.get("phone"),
+                                "education": parsed_resume.get("education", []),
+                                "certifications": parsed_resume.get("certifications", []),
+                                "companies": parsed_resume.get("companies", []),
+                                "summary": parsed_resume.get("summary"),
+                                "notice_period": parsed_resume.get("notice_period"),
                                 "file_path": metadata.get("file_path"),
                                 "cloudinary_url": metadata.get("cloudinary_url"),
-                                "match_score": min(score, 100),
-                                "match_details": {
-                                    "matches": list(set(matches)),  # Remove duplicates
-                                    "score": score,
-                                    "similarity": similarity
-                                },
-                                "source": "rag_resume",
-                                "resume_content_preview": result.get("content", "")[:300] + "..."
+                                "match_score": total_score * 100,
+                                "match_details": match_result,
+                                "source": "resume",
+                                "resume_content_preview": clean_text(resume_text[:500]) + "...",
+                                "vector_similarity": vector_score
                             }
             except Exception as e:
-                logger.error(f"Error processing PDF {doc_id}: {e}")
+                logger.error(f"Error processing resume {doc_id}: {e}")
         
-        # Convert to list
-        rag_candidates = list(pdf_candidates.values())
+        resume_candidates_list = list(resume_candidates.values())
+        logger.info(f"Found {len(resume_candidates_list)} qualified resume candidates")
         
-        logger.info(f"Found {len(rag_candidates)} RAG resume candidates")
-        
-        # STEP 3: Merge and link CSV candidates with their resumes
+        # STEP 3: Enhanced CSV-Resume linking
         final_candidates = []
         
-        # First add CSV candidates and try to link their resumes
-        for csv_candidate in csv_candidates_list:
-            candidate_name = csv_candidate.get('name', '').lower().split()[0]
+        # Link CSV candidates with their resumes
+        for csv_candidate in qualified_csv_candidates:
+            csv_name = csv_candidate.get('name', '')
             
-            # Find matching resume
-            matching_resume = None
-            best_match_score = 0
+            # Find best matching resume
+            best_resume = candidate_matching_service.find_best_resume_match(
+                csv_name, resume_candidates_list
+            )
             
-            for rag_candidate in rag_candidates:
-                rag_name = rag_candidate.get('name', '').lower().split()[0] if rag_candidate.get('name') else ""
-                
-                # Calculate name similarity
-                name_score = 0
-                if candidate_name == rag_name:
-                    name_score = 100
-                elif candidate_name in rag_name or rag_name in candidate_name:
-                    name_score = 80
-                elif candidate_name and rag_name and candidate_name[0] == rag_name[0]:
-                    name_score = 60
-                
-                if name_score > best_match_score:
-                    best_match_score = name_score
-                    matching_resume = rag_candidate
-            
-            # Add CSV candidate with resume info
+            # Create enhanced candidate profile
             final_candidate = {
                 **csv_candidate,
-                "has_resume": matching_resume is not None,
-                "resume_document_id": matching_resume.get("document_id") if matching_resume else None,
-                "resume_filename": matching_resume.get("filename") if matching_resume else None,
-                "resume_file_path": matching_resume.get("file_path") if matching_resume else None,
-                "resume_cloudinary_url": matching_resume.get("cloudinary_url") if matching_resume else None,
-                "resume_match_score": best_match_score if matching_resume else 0,
-                "combined_score": csv_candidate["match_score"] + (best_match_score * 0.3) if matching_resume else csv_candidate["match_score"]
+                "has_resume": best_resume is not None,
+                "resume_document_id": best_resume.get("document_id") if best_resume else None,
+                "resume_filename": best_resume.get("filename") if best_resume else None,
+                "resume_file_path": best_resume.get("file_path") if best_resume else None,
+                "resume_cloudinary_url": best_resume.get("cloudinary_url") if best_resume else None,
+                "resume_match_confidence": 0.0,
+                "combined_score": csv_candidate["match_score"]
             }
+            
+            if best_resume:
+                # Calculate name matching confidence
+                name_similarity = candidate_matching_service.calculate_name_similarity(
+                    csv_name, best_resume.get("name", "")
+                )
+                final_candidate["resume_match_confidence"] = name_similarity * 100
+
+                # Merge rich resume fields into CSV candidate
+                for field in ["email", "phone", "education", "certifications", "companies", "summary", "notice_period"]:
+                    if best_resume.get(field):
+                        final_candidate[field] = best_resume[field]
+
+                # IMPORTANT: Merge experience data from resume into CSV candidate
+                if best_resume.get("experience") and best_resume["experience"] != "Not specified":
+                    final_candidate["experience"] = best_resume["experience"]
+                    
+                    # Re-evaluate match with actual experience data
+                    csv_candidate_with_experience = {**csv_candidate, "experience": best_resume["experience"]}
+                    updated_match = candidate_matching_service.match_candidate_to_job(
+                        csv_candidate_with_experience, job_req, strict_location
+                    )
+                    
+                    if updated_match["is_match"]:
+                        final_candidate["match_score"] = updated_match["total_score"] * 100
+                        final_candidate["match_details"] = updated_match
+                
+                # Boost combined score if resume is well-matched
+                resume_boost = best_resume["match_score"] * 0.2 * name_similarity
+                final_candidate["combined_score"] += resume_boost
+            
             final_candidates.append(final_candidate)
         
-        # Add standalone RAG candidates (resumes without CSV entries)
+        # Add standalone resume candidates (not in CSV)
         used_resume_ids = {c.get("resume_document_id") for c in final_candidates if c.get("resume_document_id")}
         
-        for rag_candidate in rag_candidates:
-            if rag_candidate["document_id"] not in used_resume_ids:
-                final_candidates.append({
-                    **rag_candidate,
-                    "has_resume": True,
-                    "resume_document_id": rag_candidate["document_id"],
-                    "resume_filename": rag_candidate["filename"],
-                    "resume_file_path": rag_candidate["file_path"],
-                    "resume_cloudinary_url": rag_candidate.get("cloudinary_url"),
-                    "combined_score": rag_candidate["match_score"]
-                })
+        for resume in resume_candidates_list:
+            if resume["document_id"] not in used_resume_ids:
+                # Check if this resume name matches any CSV candidate we might have missed
+                csv_match = None
+                for csv_cand in qualified_csv_candidates:
+                    similarity = candidate_matching_service.calculate_name_similarity(
+                        csv_cand.get("name", ""), resume.get("name", "")
+                    )
+                    if similarity > 0.8:  # High confidence match
+                        csv_match = csv_cand
+                        break
+                
+                if csv_match:
+                    # Update the existing final candidate instead of creating duplicate
+                    for final_cand in final_candidates:
+                        if final_cand.get("name", "").lower() == csv_match.get("name", "").lower():
+                            final_cand.update({
+                                "has_resume": True,
+                                "resume_document_id": resume["document_id"],
+                                "resume_filename": resume["filename"],
+                                "resume_file_path": resume["file_path"],
+                                "resume_cloudinary_url": resume.get("cloudinary_url"),
+                                "resume_match_confidence": similarity * 100,
+                                "combined_score": final_cand["combined_score"] + (resume["match_score"] * 0.3)
+                            })
+                            break
+                else:
+                    # Add as standalone resume candidate
+                    final_candidates.append({
+                        "name": resume["name"],
+                        "role": "Extracted from Resume",
+                        "skills": resume.get("skills", "See resume content"),
+                        "location": resume.get("location", "Not specified"),
+                        "cost": resume.get("cost", "Not specified"),
+                        "experience": resume.get("experience", "Not specified"),
+                        "email": resume.get("email"),
+                        "phone": resume.get("phone"),
+                        "education": resume.get("education", []),
+                        "certifications": resume.get("certifications", []),
+                        "companies": resume.get("companies", []),
+                        "summary": resume.get("summary"),
+                        "notice_period": resume.get("notice_period"),
+                        "match_score": resume["match_score"],
+                        "match_details": resume["match_details"],
+                        "source": "resume_only",
+                        "has_resume": True,
+                        "resume_document_id": resume["document_id"],
+                        "resume_filename": resume["filename"],
+                        "resume_file_path": resume["file_path"],
+                        "resume_cloudinary_url": resume.get("cloudinary_url"),
+                        "resume_match_confidence": 100.0,
+                        "combined_score": resume["match_score"],
+                        "resume_content_preview": resume.get("resume_content_preview", "")
+                    })
         
-        # Sort by combined score
+        # Sort by combined score and limit results
         final_candidates.sort(key=lambda x: x.get("combined_score", 0), reverse=True)
-        
-        # Limit results
         final_candidates = final_candidates[:max_results]
         
         if not final_candidates:
             return {
-                "message": "No matching candidates found.",
+                "message": "No matching candidates found. Try adjusting your search criteria.",
                 "job_requirements": job_req,
                 "candidates": [],
-                "csv_found": len(csv_candidates_list),
-                "resumes_found": len(rag_candidates)
+                "search_summary": {
+                    "csv_candidates_found": len(qualified_csv_candidates),
+                    "resume_candidates_found": len(resume_candidates_list),
+                    "final_candidates": 0
+                }
             }
         
-        # STEP 4: Generate LLM summary
+        # STEP 4: Generate enhanced summary
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             temperature=0.2,
             google_api_key=GOOGLE_API_KEY
         )
         
-        # Build context from candidates
+        # Build detailed context
         context_parts = []
         for i, candidate in enumerate(final_candidates, 1):
-            if candidate.get("source") == "csv":
-                context_parts.append(f"{i}. {candidate.get('name', 'Unknown')} (CSV + Resume)")
-                context_parts.append(f"   Role: {candidate.get('role', 'N/A')}")
-                context_parts.append(f"   Skills: {candidate.get('skills', 'N/A')}")
-                context_parts.append(f"   Location: {candidate.get('location', 'N/A')}")
-                context_parts.append(f"   Cost: {candidate.get('cost', 'N/A')}")
-                context_parts.append(f"   Resume Available: {'Yes' if candidate.get('has_resume') else 'No'}")
-            else:
-                context_parts.append(f"{i}. {candidate.get('name', 'Unknown')} (Resume Only)")
-                context_parts.append(f"   Filename: {candidate.get('filename', 'N/A')}")
-                context_parts.append(f"   Skills Found: {', '.join([m.split(': ')[1] for m in candidate.get('match_details', {}).get('matches', []) if 'Skill:' in m])}")
+            context_parts.append(f"**Candidate {i}: {candidate.get('name', 'Unknown')}**")
+            context_parts.append(f"  • Role: {candidate.get('role', 'N/A')}")
+            context_parts.append(f"  • Skills: {candidate.get('skills', 'N/A')}")
+            context_parts.append(f"  • Location: {candidate.get('location', 'N/A')}")
+            context_parts.append(f"  • Cost: {candidate.get('cost', 'N/A')}")
+            context_parts.append(f"  • Match Score: {candidate.get('combined_score', 0):.1f}%")
+            context_parts.append(f"  • Resume Available: {'Yes' if candidate.get('has_resume') else 'No'}")
             
-            context_parts.append(f"   Match Score: {candidate.get('combined_score', 0):.1f}")
+            if candidate.get('has_resume'):
+                confidence = candidate.get('resume_match_confidence', 0)
+                context_parts.append(f"  • Resume Match Confidence: {confidence:.1f}%")
+            
+            # Add match reasoning
+            match_details = candidate.get('match_details', {})
+            if match_details.get('reasoning'):
+                context_parts.append(f"  • Match Reasons: {'; '.join(match_details['reasoning'])}")
+            
             context_parts.append("")
         
         context = "\n".join(context_parts)
         
-        # Generate answer
         prompt = f"""
-Based on the job requirements and matching candidates found, provide a comprehensive summary.
+You are a recruitment assistant. Based on the job requirements and candidate search results, provide a professional summary.
 
-Job Requirements:
+**Job Requirements:**
 - Role: {job_req.get('role', 'N/A')}
-- Skills: {', '.join(job_req.get('skills', []))}
+- Required Skills: {', '.join(job_req.get('skills', []))}
 - Location: {job_req.get('location', 'N/A')}
-- Cost Budget: {job_req.get('cost', 'N/A')}
+- Budget: {job_req.get('cost', 'N/A')}
 
-Search Results:
-- CSV Candidates Found: {len(csv_candidates)}
-- Resume Candidates Found: {len(rag_candidates)}
-- Total Final Candidates: {len(final_candidates)}
+**Search Results Summary:**
+- CSV Database Candidates: {len(qualified_csv_candidates)}
+- Resume Database Candidates: {len(resume_candidates_list)}
+- Total Qualified Candidates: {len(final_candidates)}
 
-Matching Candidates:
+**Top Matching Candidates:**
 {context}
 
-Provide a summary of:
-1. How well the candidates match the requirements
-2. Availability of resumes for download
-3. Recommendations for next steps
+Please provide:
+1. A brief overview of the candidate quality and match strength
+2. Key highlights of the top 3 candidates
+3. Recommendations for next steps in the hiring process
+4. Any gaps or concerns in the candidate pool
+
+Format your response professionally for a hiring manager.
 """
         
         answer = await llm.ainvoke(prompt)
         
-        logger.info(f"Job search completed: {len(final_candidates)} final candidates")
+        logger.info(f"Enhanced job search completed: {len(final_candidates)} final candidates")
         
         return {
-            "message": f"Found {len(final_candidates)} matching candidates",
+            "message": f"Found {len(final_candidates)} qualified candidates matching your requirements",
             "job_requirements": job_req,
             "search_summary": {
-                "csv_candidates_found": len(csv_candidates_list),
-                "resume_candidates_found": len(rag_candidates),
-                "final_candidates": len(final_candidates)
+                "csv_candidates_found": len(qualified_csv_candidates),
+                "resume_candidates_found": len(resume_candidates_list),
+                "final_candidates": len(final_candidates),
+                "search_query_used": rag_search_query
             },
             "candidates": final_candidates,
             "answer": answer.content if hasattr(answer, 'content') else str(answer)
         }
         
     except Exception as e:
-        logger.error(f"Job search error: {e}", exc_info=True)
+        logger.error(f"Enhanced job search error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Job search failed: {str(e)}")
-
-    except Exception as e:
-        logger.error(f"Job search error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Job search failed: {str(e)}")
 
 @router.get("/download/resume/{document_id}")

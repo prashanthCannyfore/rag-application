@@ -8,6 +8,7 @@ export default function RagDashboard() {
   const [documents, setDocuments] = useState([]);
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [messageCandidates, setMessageCandidates] = useState({}); // index -> candidates[]
   const [sources, setSources] = useState([]);
   const [loading, setLoading] = useState(false);
   const [input, setInput] = useState('');
@@ -74,15 +75,30 @@ export default function RagDashboard() {
     setLoading(true);
 
     try {
-      // Check if this is a job search query
-      const jobSearchKeywords = ['find', 'search', 'candidates', 'match', 'looking for', 'need', 'hire', 'job', 'role', 'position', 'developer', 'react', 'java', 'python', 'bangalore', 'location', 'cost', 'skills', 'experience'];
-      const isJobSearch = jobSearchKeywords.some(keyword => question.toLowerCase().includes(keyword));
+      // Check if this is a job search query - improved detection
+      const jobSearchKeywords = [
+        'find', 'search', 'candidates', 'match', 'looking for', 'need', 'hire', 
+        'job', 'role', 'position', 'developer', 'react', 'java', 'python', 
+        'javascript', 'angular', 'vue', 'node', 'sql', 'ibm', 'oracle',
+        'bangalore', 'chennai', 'mumbai', 'hyderabad', 'pune', 'coimbatore',
+        'location', 'cost', 'skills', 'experience', 'salary', 'budget',
+        'engineer', 'programmer', 'fullstack', 'backend', 'frontend',
+        'iib', 'websphere', 'integration', 'esql', 'ace', 'mq'
+      ];
+      
+      const queryLower = question.toLowerCase().trim();
+      const isJobSearch = jobSearchKeywords.some(keyword => queryLower.includes(keyword.toLowerCase())) ||
+                         queryLower.match(/\b(react|java|python|javascript|angular|vue|node|sql|ibm|oracle|iib|websphere)\s*(developer|engineer|programmer)?\b/) ||
+                         queryLower.match(/\b(developer|engineer|programmer)\b/) ||
+                         queryLower.match(/\b(ibm|iib|websphere|integration|esql|ace|mq)\b/);
+      
+      console.log(`Query: "${question}", Detected as job search: ${isJobSearch}`);
 
       if (isJobSearch) {
         // Handle as job search
         const formData = new FormData();
         formData.append('job_description', question);
-        formData.append('max_results', 2);
+        formData.append('max_results', 10);
         formData.append('strict_location', false);
 
         const response = await fetch('http://localhost:8000/api/rag/search/job', {
@@ -93,21 +109,25 @@ export default function RagDashboard() {
         if (!response.ok) throw new Error('Job search failed');
         
         const data = await response.json();
-        
-        // Build AI response
-        const candidateList = (data.candidates || [])
-          .slice(0, 5)
-          .map(c => `• ${c.name || c.filename} - ${c.role || 'N/A'} (Match: ${Math.round(c.match_score || 0)}%, Location: ${c.location || 'N/A'}, Cost: ₹${c.cost || 'N/A'})`)
-          .join('\n');
+        const found = data.candidates || [];
 
         const aiMessage = {
           role: 'assistant',
-          content: `Found ${data.candidates?.length || 0} matching candidates:\n\n${candidateList || 'No candidates found matching your criteria.'}\n\nYou can download the resumes from the Sources panel on the right.`
+          content: found.length > 0
+            ? `Found ${found.length} matching candidate${found.length !== 1 ? 's' : ''} for your search.`
+            : 'No candidates found matching your criteria.',
+          isJobResult: true
         };
-        setMessages(prev => [...prev, aiMessage]);
 
-        // Populate sources with matched resumes
-        const matchedSources = (data.candidates || [])
+        setMessages(prev => {
+          const newMessages = [...prev, aiMessage];
+          // Store candidates keyed by the new message index
+          setMessageCandidates(mc => ({ ...mc, [newMessages.length - 1]: found }));
+          return newMessages;
+        });
+
+        // Populate sources panel
+        const matchedSources = found
           .filter(c => c.has_resume)
           .map((c, idx) => ({
             content: `📄 ${c.name || c.filename}`,
@@ -118,7 +138,6 @@ export default function RagDashboard() {
             candidate_name: c.name || c.filename,
             candidate_role: c.role || 'Resume'
           }));
-        
         setSources(matchedSources);
       } else {
         // Handle as regular RAG search
@@ -336,25 +355,31 @@ export default function RagDashboard() {
           ) : (
             <>
               {messages.map((msg, index) => (
-                <div key={index} style={{ display: 'flex', gap: '12px', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                  {msg.role === 'assistant' && (
-                    <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#2563eb', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: '16px', flexShrink: 0 }}>🤖</div>
-                  )}
-                  <div style={{
-                    maxWidth: '70%',
-                    padding: '12px 16px',
-                    borderRadius: '8px',
-                    backgroundColor: msg.role === 'user' ? '#2563eb' : '#e5e7eb',
-                    color: msg.role === 'user' ? '#fff' : '#000',
-                    fontSize: '14px',
-                    lineHeight: '1.5',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word'
-                  }}>
-                    {msg.content}
-                  </div>
+                <div key={index} style={{ marginBottom: '12px' }}>
                   {msg.role === 'user' && (
-                    <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#d1d5db', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#374151', fontSize: '16px', flexShrink: 0 }}>👤</div>
+                    <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                      <div style={{ maxWidth: '70%', padding: '12px 16px', borderRadius: '8px', backgroundColor: '#2563eb', color: '#fff', fontSize: '14px', lineHeight: '1.5', wordBreak: 'break-word' }}>
+                        {msg.content}
+                      </div>
+                      <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#d1d5db', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#374151', fontSize: '16px', flexShrink: 0 }}>👤</div>
+                    </div>
+                  )}
+                  {msg.role === 'assistant' && (
+                    <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-start' }}>
+                      <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#2563eb', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: '16px', flexShrink: 0 }}>🤖</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: 'inline-block', padding: '12px 16px', borderRadius: '8px', backgroundColor: '#e5e7eb', color: '#111827', fontSize: '14px', lineHeight: '1.5', marginBottom: msg.isJobResult && messageCandidates[index]?.length ? '12px' : '0' }}>
+                          {msg.content}
+                        </div>
+                        {msg.isJobResult && messageCandidates[index]?.length > 0 && (
+                          <div style={{ marginTop: '12px' }}>
+                            {messageCandidates[index].map((candidate, ci) => (
+                              <CandidateResult key={ci} candidate={candidate} onDownload={downloadResume} />
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   )}
                 </div>
               ))}

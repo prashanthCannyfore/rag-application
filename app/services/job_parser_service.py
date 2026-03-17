@@ -24,18 +24,30 @@ class JobParserService:
             "rest_api": ["rest api", "restful", "restful api", "rest"],
             "mysql": ["mysql"],
             "postgresql": ["postgresql", "postgres", "pg"],
-            "mongodb": ["mongodb", "mongo"],
+            "mongodb": ["mongodb", "mongo", "nosql"],
             "fastapi": ["fastapi"],
-            "ibm": ["ibm", "ibm integration bus", "iib", "websphere"],
+            "fullstack": ["fullstack", "full stack", "full-stack"],
+            "ibm": ["ibm", "ibm integration bus", "iib", "websphere", "ace", "app connect enterprise", "esql", "extended sql", "mq", "message queue"],
             "java": ["java", "j2ee", "spring", "hibernate"],
             "javascript": ["javascript", "js", "node", "nodejs"],
             "angular": ["angular", "angularjs"],
             "vue": ["vue", "vuejs"],
-            "sql": ["sql", "mysql", "postgresql", "oracle"],
+            "sql": ["sql", "mysql", "postgresql", "oracle", "oracle sql", "plsql", "pl/sql", "tsql", "mssql", "sqlserver"],
+            "oracle": ["oracle", "oracle sql", "plsql", "pl/sql", "oracle database", "oracle db"],
             "aws": ["aws", "amazon web services", "ec2", "s3"],
             "azure": ["azure", "microsoft azure"],
             "docker": ["docker", "containerization"],
-            "kubernetes": ["kubernetes", "k8s"]
+            "kubernetes": ["kubernetes", "k8s"],
+            "esql": ["esql", "extended sql"]
+        }
+        
+        # Role synonyms for better matching
+        self.role_synonyms = {
+            "oracle developer": ["sql developer", "database developer", "oracle sql developer", "plsql developer"],
+            "sql developer": ["oracle developer", "database developer", "db developer"],
+            "database developer": ["sql developer", "oracle developer", "db developer"],
+            "ibm developer": ["ibm integration developer", "iib developer", "websphere developer"],
+            "integration developer": ["ibm developer", "iib developer", "middleware developer"]
         }
     
     def parse_job_description(self, job_description: str) -> Dict[str, any]:
@@ -57,24 +69,46 @@ class JobParserService:
             "raw_text": job_description
         }
         
-        # Extract role/title - more flexible pattern with typo tolerance
+        # Extract role/title - enhanced with Oracle/SQL patterns and typo tolerance
         role_patterns = [
-            r"(?i)(python|react|java|node|backend|frontend|fullstack|ibm|angular|vue)\s*develop[er]*",  # Handle typos like "develpoer"
+            r"(?i)(mongodb|mongo)\s*develop[er]*",  # MongoDB developer variations - check this first
+            r"(?i)(oracle|sql|database|db)\s*develop[er]*",  # Oracle/SQL developer variations
+            r"(?i)(full\s*stack|fullstack)\s*develop?[eor]*",  # Full stack developer variations - check this early
+            r"(?i)(python|react|java|node|backend|frontend|ibm|angular|vue)\s*develop?[eor]*",  # Handle typos like "develoeper"
             r"(?i)(software\s*engineer|devops\s*engineer|data\s*engineer)",
             r"(?i)(role[:\s]+)([A-Za-z\s]+?)(?=\n|$)",
-            r"(?i)\b(python|react|java|node|backend|frontend|fullstack|ibm|angular|vue)\s+developer\b",  # More specific pattern
-            r"(?i)\b(python|react|java|node|backend|frontend|fullstack|ibm|angular|vue)\b"  # Fallback: just the technology name
+            r"(?i)\b(mongodb|mongo|oracle|sql|database|python|react|java|node|backend|frontend|full\s*stack|fullstack|ibm|angular|vue)\s+develop[eor]*\b",
+            r"(?i)\b(mongodb|mongo|oracle|sql|database|python|react|java|node|backend|frontend|full\s*stack|fullstack|ibm|angular|vue)\b"
         ]
+        
         for pattern in role_patterns:
             match = re.search(pattern, job_description)
             if match:
-                matched_text = match.group(0).strip()
-                # Clean up the match
-                if "develop" in matched_text.lower():
+                matched_text = match.group(0).strip().lower()
+                
+                # Handle Full Stack -> Full Stack developer mapping (check early)
+                if "full stack" in matched_text or "fullstack" in matched_text:
+                    result["role"] = "full stack developer"
+                # Handle MongoDB -> MongoDB developer mapping (check first)
+                if "mongodb" in matched_text or "mongo" in matched_text:
+                    result["role"] = "mongodb developer"
+                # Handle Oracle -> SQL developer mapping
+                elif "oracle" in matched_text:
+                    result["role"] = "sql developer"  # Map Oracle to SQL developer
+                elif "database" in matched_text or "db" in matched_text:
+                    result["role"] = "sql developer"
+                elif "develop" in matched_text:
                     # Extract the technology part and add "developer"
-                    tech_match = re.search(r"(?i)(python|react|java|node|backend|frontend|fullstack|ibm|angular|vue)", matched_text)
+                    tech_match = re.search(r"(?i)(python|react|java|node|backend|frontend|full\s*stack|fullstack|ibm|angular|vue|sql|mongodb|mongo)", matched_text)
                     if tech_match:
-                        result["role"] = f"{tech_match.group(1).lower()} developer"
+                        tech = tech_match.group(1).lower()
+                        # Map mongo to mongodb for consistency
+                        if tech == "mongo":
+                            tech = "mongodb"
+                        # Handle full stack variations
+                        elif "full" in tech and "stack" in tech:
+                            tech = "full stack"
+                        result["role"] = f"{tech} developer"
                 else:
                     result["role"] = matched_text.lower()
                 break
@@ -88,28 +122,51 @@ class JobParserService:
         # Extract skills
         result["skills"] = self._extract_skills(job_description)
         
-        # Extract location - look for city names after "in" or "at", or standalone city names
+        # Extract location - improved pattern matching with better validation
         location_patterns = [
-            r"(?i)\bin\s+([A-Za-z]+)",  # "in Bangalore"
-            r"(?i)\bat\s+([A-Za-z]+)",  # "at Bangalore"  
-            r"(?i)\b(bangalore|chennai|mumbai|delhi|hyderabad|pune|coimbatore|kolkata)\b"  # Common Indian cities
+            r"(?i)(?:in|at|from|based in|located in)\s+([A-Za-z\s]+?)(?:\s|$|,|\.|;)",
+            r"(?i)\b(bangalore|bengaluru|chennai|mumbai|delhi|hyderabad|pune|coimbatore|kolkata|gurgaon|noida|ahmedabad|jaipur|lucknow|kanpur|nagpur|indore|thane|bhopal|visakhapatnam|pimpri|patna|vadodara|ludhiana|agra|nashik|faridabad|meerut|rajkot|kalyan|vasai|varanasi|srinagar|aurangabad|dhanbad|amritsar|navi mumbai|allahabad|ranchi|howrah|jabalpur|gwalior|vijayawada|jodhpur|madurai|raipur|kota|chandigarh|guwahati|solapur|hubli|tiruchirappalli|bareilly|mysore|tiruppur|gurgaon|salem|mira|bhiwandi|saharanpur|gorakhpur|bikaner|amravati|noida|jamshedpur|bhilai|cuttack|firozabad|kochi|nellore|bhavnagar|dehradun|durgapur|asansol|rourkela|nanded|kolhapur|ajmer|akola|gulbarga|jamnagar|ujjain|loni|siliguri|jhansi|ulhasnagar|jammu|sangli|mangalore|erode|belgaum|ambattur|tirunelveli|malegaon|gaya|jalgaon|udaipur|maheshtala)\b"
         ]
+        
+        # Avoid false positives - words that are NOT locations
+        non_location_words = {
+            'react', 'javascript', 'java', 'python', 'node', 'angular', 'vue', 
+            'frontend', 'backend', 'fullstack', 'developer', 'experience', 
+            'years', 'plus', 'minimum', 'maximum', 'least', 'most'
+        }
         
         for pattern in location_patterns:
             location_match = re.search(pattern, job_description)
             if location_match:
-                result["location"] = location_match.group(1).strip()
-                break
+                location = location_match.group(1).strip() if len(location_match.groups()) > 0 else location_match.group(0).strip()
+                # Clean up common words
+                location = re.sub(r'\b(in|at|from|based|located)\b', '', location, flags=re.IGNORECASE).strip()
+                
+                # Validate location - avoid false positives
+                if location and len(location) > 2 and location.lower() not in non_location_words:
+                    result["location"] = location.title()
+                    break
         
         # Extract cost/salary
         cost_match = re.search(r"(?i)(cost|salary)[:\s]+(\d+)", job_description)
         if cost_match:
             result["cost"] = int(cost_match.group(2))
         
-        # Extract experience
-        exp_match = re.search(r"(?i)(experience|exp)[:\s]+(\d+)", job_description)
-        if exp_match:
-            result["experience"] = int(exp_match.group(2))
+        # Extract experience - enhanced patterns
+        experience_patterns = [
+            r"(?i)(\d+)\s*\+?\s*years?\s+(?:of\s+)?(?:experience|exp)",  # "8+ years experience", "5 years of experience"
+            r"(?i)(\d+)\s*plus\s+years?\s+(?:of\s+)?(?:experience|exp)",  # "8 plus years experience"
+            r"(?i)(?:experience|exp)[:\s]+(\d+)\+?\s*years?",  # "experience: 8+ years"
+            r"(?i)(?:minimum|min|at least)\s+(\d+)\s*years?",  # "minimum 8 years"
+            r"(?i)(\d+)\s*to\s*\d+\s*years?",  # "5 to 8 years" - take minimum
+            r"(?i)(\d+)\s*-\s*\d+\s*years?",  # "5-8 years" - take minimum
+        ]
+        
+        for pattern in experience_patterns:
+            exp_match = re.search(pattern, job_description)
+            if exp_match:
+                result["experience"] = int(exp_match.group(1))
+                break
         
         return result
     
